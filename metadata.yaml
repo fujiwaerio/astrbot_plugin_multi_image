@@ -1,0 +1,14 @@
+name: astrbot_plugin_multi_image
+display_name: 多模型生图
+desc: 统一调用 GPT、Gemini、ComfyUI、Seedream、Grok、即梦与通义万相生图，支持图生图与 ComfyUI 多工作流，并专门兼容 NewAPI / OneAPI 等中转站
+short_desc: 一个指令打通七个生图渠道，中转站也能正常用
+version: 0.1.1
+author: DeepSeek Harness
+repo: https://github.com/fujiwaerio/astrbot_plugin_multi_image
+astrbot_version: ">=4.5"
+tags:
+  - 生图
+  - AI绘画
+  - 多模型
+  - ComfyUI
+  - 中转站

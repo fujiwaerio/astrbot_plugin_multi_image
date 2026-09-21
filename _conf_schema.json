@@ -1,0 +1,641 @@
+{
+  "default_provider": {
+    "description": "默认生图渠道",
+    "type": "string",
+    "hint": "不写渠道名时使用该渠道，例如 /draw 一只橘猫",
+    "default": "gpt",
+    "options": ["gpt", "gemini", "comfyui", "seedream", "grok", "jimeng", "qwen"]
+  },
+  "default_width": {
+    "description": "默认图片宽度",
+    "type": "int",
+    "default": 1024
+  },
+  "default_height": {
+    "description": "默认图片高度",
+    "type": "int",
+    "default": 1024
+  },
+  "default_count": {
+    "description": "默认生成数量",
+    "type": "int",
+    "default": 1
+  },
+  "max_count": {
+    "description": "单次最多生成数量",
+    "type": "int",
+    "hint": "防止用户用 --n 参数一次请求过多图片",
+    "default": 4
+  },
+  "timeout": {
+    "description": "默认请求超时（秒）",
+    "type": "int",
+    "hint": "生图较慢时调大，ComfyUI 与即梦建议 180 以上",
+    "default": 180
+  },
+  "enable_reference": {
+    "description": "启用图生图 / 垫图",
+    "type": "bool",
+    "hint": "开启后，把参考图和提示词一起发送即可走图生图",
+    "default": true
+  },
+  "max_references": {
+    "description": "最多使用几张参考图",
+    "type": "int",
+    "default": 3
+  },
+  "reference_max_mb": {
+    "description": "单张参考图大小上限（MB）",
+    "type": "int",
+    "default": 8
+  },
+  "use_file_service": {
+    "description": "把本地参考图注册到 AstrBot 回调文件服务",
+    "type": "bool",
+    "hint": "即梦等只接受图片 URL 的接口需要开启；需要 AstrBot 已配置 callback_api_base",
+    "default": false
+  },
+  "force_download": {
+    "description": "全局强制代为下载图片",
+    "type": "bool",
+    "hint": "中转站返回的图片链接需要鉴权时开启，插件会带鉴权头下载后以本地文件发送",
+    "default": false
+  },
+  "admin_only": {
+    "description": "仅管理员可用",
+    "type": "bool",
+    "hint": "开启后只有管理员能用（优先于下面所有群名单判断）",
+    "default": false
+  },
+  "admin_bypass": {
+    "description": "管理员绕过限制",
+    "type": "bool",
+    "hint": "开启后，AstrBot 管理员（主配置 admins_id 里的号）不受下面四个名单与频率限制的约束；普通成员照常受限。默认关闭",
+    "default": false
+  },
+  "rate_limit_enabled": {
+    "description": "启用频率限制",
+    "type": "bool",
+    "hint": "⚠️ 建议开启：生图是真金白银的调用，群里连刷会很快把额度烧完。默认关闭是为了不改变既有行为",
+    "default": false
+  },
+  "rate_limit_scope": {
+    "description": "限制维度",
+    "type": "string",
+    "hint": "user=每人独立计数（推荐，更公平）；group=整个群共用一个额度（更省额度）。私聊一律按人算",
+    "default": "user",
+    "options": ["user", "group"]
+  },
+  "rate_limit_window_minutes": {
+    "description": "统计窗口（分钟）",
+    "type": "int",
+    "default": 10
+  },
+  "rate_limit_max_calls": {
+    "description": "窗口内最多生成几次",
+    "type": "int",
+    "hint": "只有成功受理的调用才计数；被限流的重试不会把窗口往后推",
+    "default": 5
+  },
+  "group_whitelist": {
+    "description": "群白名单",
+    "type": "list",
+    "hint": "只有名单内的群可用。⚠️ 与「群黑名单」只能填一个：本项非空时黑名单不生效；群黑名单非空时本项不生效。两者都留空则不对群做限制",
+    "default": []
+  },
+  "group_blacklist": {
+    "description": "群黑名单",
+    "type": "list",
+    "hint": "名单内的群不可用。⚠️ 本项非空时「群白名单」不生效，且「群内个人黑白名单」整体不生效",
+    "default": []
+  },
+  "group_user_whitelist": {
+    "description": "群内个人白名单",
+    "type": "dict",
+    "items": {},
+    "hint": "键=群号，值=允许使用的成员号数组，例如 {\"123456\": [\"10001\", \"10002\"]}。⚠️ 只在群白名单/群黑名单都留空时才生效；同一群里本项与「群内个人黑名单」只填一个",
+    "default": {}
+  },
+  "group_user_blacklist": {
+    "description": "群内个人黑名单",
+    "type": "dict",
+    "items": {},
+    "hint": "键=群号，值=禁止使用的成员号数组，例如 {\"123456\": [\"10001\"]}。⚠️ 只在群白名单/群黑名单都留空时才生效；同一群里本项非空时该群的白名单不生效",
+    "default": {}
+  },
+  "one_task_per_session": {
+    "description": "同一会话同时只允许一个生图任务",
+    "type": "bool",
+    "default": true
+  },
+  "cache_keep_minutes": {
+    "description": "本地图片缓存保留时长（分钟）",
+    "type": "int",
+    "hint": "填 0 表示不自动清理",
+    "default": 30
+  },
+
+  "gpt": {
+    "description": "GPT / OpenAI 兼容渠道（通用位）",
+    "type": "object",
+    "hint": "这是「通用 OpenAI 兼容位」：只要对方提供 OpenAI 协议的 /v1/images/generations（或退一步 /v1/chat/completions 能出图），不管背后实际是 GPT、FLUX、Stable Diffusion 还是别的模型，都填这里，无需改代码。官方 OpenAI 填 https://api.openai.com，中转站/第三方填其地址",
+    "items": {
+      "api_base": {
+        "description": "API 地址",
+        "type": "string",
+        "hint": "可填 https://api.openai.com、https://api.openai.com/v1，或中转站/第三方服务的 https://xxx.com/v1",
+        "default": "https://api.openai.com"
+      },
+      "api_key": {
+        "description": "API Key",
+        "type": "string",
+        "default": "",
+        "secret": true,
+        "obvious_hint": true
+      },
+      "model": {
+        "description": "模型名称",
+        "type": "string",
+        "hint": "填对方站上真实的模型名：官方 OpenAI 是 gpt-image-1；中转站可能是 gpt-4o-image、dall-e-3；第三方服务则是 flux-1.1-pro、sd3.5-large 之类。不确定就拉一下对方的 /v1/models",
+        "default": "gpt-image-1"
+      },
+      "size": {
+        "description": "默认输出尺寸",
+        "type": "string",
+        "hint": "留空则用全局的默认宽高（1024x1024）。gpt-image-1 只支持 1024x1024 / 1536x1024 / 1024x1536；dall-e-3 支持 1024x1024 / 1792x1024 / 1024x1792",
+        "default": ""
+      },
+      "api_style": {
+        "description": "调用协议",
+        "type": "string",
+        "hint": "auto=先试图片接口再回退对话接口；images=只用 /images/generations；chat=只用 /chat/completions",
+        "default": "auto",
+        "options": ["auto", "images", "chat"]
+      },
+      "timeout": {"description": "请求超时（秒）", "type": "int", "default": 180},
+      "extra_headers": {
+        "description": "附加请求头",
+        "type": "dict",
+        "items": {},
+        "hint": "自建中转站需要自定义鉴权头时填写，例如 {\"X-Api-Key\":\"xxx\"}",
+        "default": {}
+      },
+      "extra_body": {
+        "description": "附加请求体字段",
+        "type": "dict",
+        "items": {},
+        "hint": "例如 {\"response_format\":\"b64_json\"}、{\"quality\":\"high\"}",
+        "default": {}
+      },
+      "proxy": {"description": "HTTP(S) 代理", "type": "string", "hint": "例如 http://127.0.0.1:7890", "default": ""},
+      "verify_ssl": {"description": "校验 TLS 证书", "type": "bool", "hint": "自建自签名站点可关闭", "default": true},
+      "force_download": {"description": "强制代为下载图片", "type": "bool", "default": false}
+    }
+  },
+
+  "gemini": {
+    "description": "Gemini / Imagen 渠道",
+    "type": "object",
+    "items": {
+      "api_base": {
+        "description": "API 地址",
+        "type": "string",
+        "hint": "官方填 https://generativelanguage.googleapis.com；中转站填其地址",
+        "default": "https://generativelanguage.googleapis.com"
+      },
+      "api_key": {
+        "description": "API Key",
+        "type": "string",
+        "default": "",
+        "secret": true,
+        "obvious_hint": true
+      },
+      "model": {
+        "description": "模型名称",
+        "type": "string",
+        "hint": "例如 gemini-2.5-flash-image；imagen-* 会自动改走 :predict 接口",
+        "default": "gemini-2.5-flash-image"
+      },
+      "api_style": {
+        "description": "调用协议",
+        "type": "string",
+        "hint": "auto=原生协议失败后自动回退 OpenAI 兼容层；native=只用原生；gemini_openai=/v1beta/openai；openai=/v1 中转站协议",
+        "default": "auto",
+        "options": ["auto", "native", "gemini_openai", "openai"]
+      },
+      "response_modalities": {
+        "description": "返回模态",
+        "type": "string",
+        "hint": "原生协议使用，通常保持 TEXT,IMAGE；纯图片模型可改为 IMAGE",
+        "default": "TEXT,IMAGE"
+      },
+      "send_aspect_ratio": {
+        "description": "始终发送画面比例",
+        "type": "bool",
+        "hint": "开启后原生协议会带上 imageConfig.aspectRatio。注意：不支持该配置的模型会直接报错（不是忽略），所以默认关闭；需要时也可以用 /draw gemini --ratio 16:9 单次指定",
+        "default": false
+      },
+      "timeout": {"description": "请求超时（秒）", "type": "int", "default": 180},
+      "extra_headers": {"description": "附加请求头", "type": "dict", "items": {}, "default": {}},
+      "extra_body": {"description": "附加请求体字段", "type": "dict", "items": {}, "default": {}},
+      "proxy": {"description": "HTTP(S) 代理", "type": "string", "default": ""},
+      "verify_ssl": {"description": "校验 TLS 证书", "type": "bool", "default": true},
+      "force_download": {"description": "强制代为下载图片", "type": "bool", "default": false}
+    }
+  },
+
+  "comfyui": {
+    "description": "ComfyUI 渠道",
+    "type": "object",
+    "hint": "⚠️ 只在自己部署了 ComfyUI 时才需要配置，没装就整块留空、不影响其它渠道。地址默认留空，需要时填 ComfyUI 的根地址（如 http://127.0.0.1:8188）；这个渠道是否可用只看「工作流模板」有没有内容",
+    "items": {
+      "api_base": {
+        "description": "ComfyUI 地址",
+        "type": "string",
+        "hint": "只填根地址，如 http://127.0.0.1:8188，插件会自动拼接 /prompt、/history、/view",
+        "default": ""
+      },
+      "api_key": {
+        "description": "API Key（可选）",
+        "type": "string",
+        "hint": "ComfyUI 套在带鉴权的反向代理后面时才需要",
+        "default": "",
+        "secret": true
+      },
+      "workflows": {
+        "description": "工作流模板",
+        "type": "template_list",
+        "hint": "可配置多套工作流，用 /draw comfyui@别名 切换",
+        "templates": {
+          "workflow": {
+            "name": "ComfyUI 工作流",
+            "hint": "从 ComfyUI 界面「保存(API格式)」导出后粘贴或指定文件",
+            "display_item": "alias",
+            "hide_hint_in_list": true,
+            "items": {
+              "alias": {
+                "description": "别名",
+                "type": "string",
+                "hint": "用 /draw comfyui@别名 选择这套工作流",
+                "default": "default"
+              },
+              "workflow_path": {
+                "description": "工作流文件路径",
+                "type": "string",
+                "hint": "API 格式导出的 json 文件绝对路径，与下方二选一",
+                "default": ""
+              },
+              "workflow_json": {
+                "description": "工作流 JSON",
+                "type": "text",
+                "hint": "直接粘贴 API 格式的 JSON；也可用 {{prompt}} {{negative_prompt}} {{width}} {{height}} {{seed}} {{count}} 占位符自定义注入位置",
+                "default": ""
+              },
+              "positive_node": {
+                "description": "正向提示词节点 id",
+                "type": "string",
+                "hint": "留空则自动查找第一个 CLIPTextEncode",
+                "default": ""
+              },
+              "negative_node": {
+                "description": "负向提示词节点 id",
+                "type": "string",
+                "hint": "留空则自动查找第二个 CLIPTextEncode",
+                "default": ""
+              },
+              "latent_node": {
+                "description": "尺寸节点 id",
+                "type": "string",
+                "hint": "留空则自动查找 EmptyLatentImage 一类节点",
+                "default": ""
+              },
+              "seed_node": {
+                "description": "采样器节点 id",
+                "type": "string",
+                "hint": "留空则自动查找 KSampler 一类节点",
+                "default": ""
+              },
+              "image_node": {
+                "description": "图片输入节点 id",
+                "type": "string",
+                "hint": "图生图时写入参考图，留空则自动查找 LoadImage",
+                "default": ""
+              }
+            }
+          }
+        },
+        "default": []
+      },
+      "default_workflow": {
+        "description": "默认工作流别名",
+        "type": "string",
+        "hint": "不写 @别名 时使用；留空则用第一个模板",
+        "default": ""
+      },
+      "poll_interval": {
+        "description": "轮询间隔（秒）",
+        "type": "float",
+        "default": 1.0
+      },
+      "max_wait": {
+        "description": "最长等待时间（秒）",
+        "type": "int",
+        "hint": "复杂工作流可能跑几分钟，按需调大",
+        "default": 300
+      },
+      "client_id": {
+        "description": "ComfyUI client_id",
+        "type": "string",
+        "hint": "留空自动生成",
+        "default": "",
+        "invisible": true
+      },
+      "timeout": {"description": "单次请求超时（秒）", "type": "int", "default": 60},
+      "extra_headers": {"description": "附加请求头", "type": "dict", "items": {}, "default": {}},
+      "proxy": {"description": "HTTP(S) 代理", "type": "string", "default": ""},
+      "verify_ssl": {"description": "校验 TLS 证书", "type": "bool", "default": true},
+      "force_download": {
+        "description": "强制代为下载图片",
+        "type": "bool",
+        "hint": "ComfyUI 返回的是 Base64，本项对其无影响",
+        "default": false
+      }
+    }
+  },
+
+  "seedream": {
+    "description": "Seedream（火山方舟）渠道",
+    "type": "object",
+    "hint": "官方参数表里没有 n 和 seed，多图需用组图能力；参数被拒时插件会自动摘掉该字段重试",
+    "items": {
+      "api_base": {
+        "description": "API 地址",
+        "type": "string",
+        "hint": "国内 https://ark.cn-beijing.volces.com/api/v3；国际 https://ark.ap-southeast.bytepluses.com/api/v3",
+        "default": "https://ark.cn-beijing.volces.com/api/v3"
+      },
+      "api_key": {
+        "description": "方舟 API Key",
+        "type": "string",
+        "default": "",
+        "secret": true,
+        "obvious_hint": true
+      },
+      "model": {
+        "description": "模型 ID",
+        "type": "string",
+        "hint": "需带日期后缀，例如 doubao-seedream-4-0-250828；国际区不带 doubao- 前缀。⚠️ SeedEdit（*seededit*）是图像编辑模型，必须带参考图，纯文字生图请选 Seedream",
+        "default": "doubao-seedream-4-0-250828"
+      },
+      "size": {
+        "description": "输出尺寸",
+        "type": "string",
+        "hint": "档位 1K/1.5K/2K/3K/4K（大写 K），或 2048x2048 这种像素写法，两者不可混用",
+        "default": "2K"
+      },
+      "watermark": {
+        "description": "添加水印",
+        "type": "bool",
+        "default": false
+      },
+      "optimize_prompt": {
+        "description": "启用官方提示词优化",
+        "type": "bool",
+        "default": false
+      },
+      "timeout": {"description": "请求超时（秒）", "type": "int", "default": 180},
+      "extra_headers": {"description": "附加请求头", "type": "dict", "items": {}, "default": {}},
+      "extra_body": {"description": "附加请求体字段", "type": "dict", "items": {}, "default": {}},
+      "proxy": {"description": "HTTP(S) 代理", "type": "string", "default": ""},
+      "verify_ssl": {"description": "校验 TLS 证书", "type": "bool", "default": true},
+      "force_download": {"description": "强制代为下载图片", "type": "bool", "default": false}
+    }
+  },
+
+  "grok": {
+    "description": "Grok（xAI）渠道",
+    "type": "object",
+    "items": {
+      "api_base": {
+        "description": "API 地址",
+        "type": "string",
+        "hint": "官方填 https://api.x.ai，只需根地址",
+        "default": "https://api.x.ai"
+      },
+      "api_key": {
+        "description": "API Key",
+        "type": "string",
+        "default": "",
+        "secret": true,
+        "obvious_hint": true
+      },
+      "model": {
+        "description": "文生图模型",
+        "type": "string",
+        "hint": "官方当前为 grok-imagine-image-2.0；老中转站可能只认 grok-imagine-1.0",
+        "default": "grok-imagine-image-2.0",
+        "options": ["grok-imagine-image-2.0", "grok-imagine-1.0", "grok-2-image-1212"]
+      },
+      "size": {
+        "description": "默认输出尺寸",
+        "type": "string",
+        "hint": "留空则用全局默认宽高。官方接口其实没有 size 字段，需要发官方字段时把下面的「尺寸参数写法」改成 aspect_ratio",
+        "default": ""
+      },
+      "edit_model": {
+        "description": "图生图模型",
+        "type": "string",
+        "hint": "留空则沿用上面的模型（官方现在两用同一个模型，一般不用填）",
+        "default": ""
+      },
+      "size_mode": {
+        "description": "尺寸参数写法",
+        "type": "string",
+        "hint": "size=发 OpenAI 风格的 size（中转站常用）；aspect_ratio=发官方的 aspect_ratio + resolution",
+        "default": "size",
+        "options": ["size", "aspect_ratio"]
+      },
+      "edit_mode": {
+        "description": "图生图请求格式",
+        "type": "string",
+        "hint": "auto=先按官方 JSON 发，失败再退回 multipart；官方接口只认 json，部分中转站只认 multipart",
+        "default": "auto",
+        "options": ["auto", "json", "multipart"]
+      },
+      "api_style": {
+        "description": "调用协议",
+        "type": "string",
+        "hint": "auto=图片接口失败后回退对话接口",
+        "default": "auto",
+        "options": ["auto", "images", "chat"]
+      },
+      "timeout": {"description": "请求超时（秒）", "type": "int", "default": 180},
+      "extra_headers": {"description": "附加请求头", "type": "dict", "items": {}, "default": {}},
+      "extra_body": {"description": "附加请求体字段", "type": "dict", "items": {}, "default": {}},
+      "proxy": {"description": "HTTP(S) 代理", "type": "string", "default": ""},
+      "verify_ssl": {"description": "校验 TLS 证书", "type": "bool", "default": true},
+      "force_download": {"description": "强制代为下载图片", "type": "bool", "default": false}
+    }
+  },
+
+  "jimeng": {
+    "description": "即梦渠道",
+    "type": "object",
+    "hint": "⚠️ 只在自己搭了 jimeng-2api / jimeng-free-api 这类转换服务时才需要配置：地址默认留空，需要时填自己那个服务的地址（如 http://localhost:5100）；没搭服务就整块留空",
+    "items": {
+      "api_base": {
+        "description": "API 地址",
+        "type": "string",
+        "hint": "填自己搭的即梦 API 服务地址，例如 http://localhost:5100 或所用的中转服务地址",
+        "default": ""
+      },
+      "api_key": {
+        "description": "Session ID",
+        "type": "string",
+        "hint": "可填多个，用逗号或换行分隔，遇到限额或失效时自动轮换；国际站需在开头加 us-",
+        "default": "",
+        "secret": true,
+        "obvious_hint": true
+      },
+      "model": {
+        "description": "模型名称",
+        "type": "string",
+        "default": "jimeng-4.0",
+        "options": [
+          "jimeng-4.1",
+          "jimeng-4.0",
+          "jimeng-3.1",
+          "jimeng-3.0",
+          "jimeng-2.1",
+          "jimeng-xl-pro",
+          "nanobanana",
+          "nanobananapro"
+        ]
+      },
+      "ratio": {
+        "description": "默认画面比例",
+        "type": "string",
+        "hint": "留空则按图片宽高自动换算",
+        "default": "",
+        "options": ["", "1:1", "4:3", "3:4", "16:9", "9:16", "3:2", "2:3", "21:9"]
+      },
+      "resolution": {
+        "description": "默认分辨率",
+        "type": "string",
+        "default": "2k",
+        "options": ["1k", "2k", "4k"]
+      },
+      "intelligent_ratio": {
+        "description": "启用智能比例",
+        "type": "bool",
+        "hint": "仅部分模型支持，不支持的模型会被服务端忽略",
+        "default": false
+      },
+      "sample_strength": {
+        "description": "图生图采样强度",
+        "type": "float",
+        "hint": "0.0-1.0，越大越偏离原图",
+        "default": 0.7
+      },
+      "reference_mode": {
+        "description": "参考图传参方式",
+        "type": "string",
+        "hint": "data_uri=发 data:image/...;base64；base64=只发裸 Base64。若服务端两者都不认，请开启全局的「注册到回调文件服务」让它改用 URL",
+        "default": "data_uri",
+        "options": ["data_uri", "base64"]
+      },
+      "api_style": {
+        "description": "调用协议",
+        "type": "string",
+        "hint": "auto=图生图走 /images/compositions，文生图走 /images/generations；openai=改用中转站的 OpenAI 协议",
+        "default": "auto",
+        "options": ["auto", "images", "compositions", "chat"]
+      },
+      "timeout": {"description": "请求超时（秒）", "type": "int", "default": 180},
+      "extra_headers": {"description": "附加请求头", "type": "dict", "items": {}, "default": {}},
+      "extra_body": {"description": "附加请求体字段", "type": "dict", "items": {}, "default": {}},
+      "proxy": {"description": "HTTP(S) 代理", "type": "string", "default": ""},
+      "verify_ssl": {"description": "校验 TLS 证书", "type": "bool", "default": true},
+      "force_download": {"description": "强制代为下载图片", "type": "bool", "default": false}
+    }
+  },
+
+  "qwen": {
+    "description": "阿里云百炼（通义万相 / qwen-image）渠道",
+    "type": "object",
+    "hint": "百炼的图片生成不在 OpenAI 兼容层里，必须走原生 API，插件已自动处理同步与异步两条路径",
+    "items": {
+      "api_base": {
+        "description": "API 地址",
+        "type": "string",
+        "hint": "填 https://dashscope.aliyuncs.com 即可；误填成 /compatible-mode/v1 也会被自动还原成根地址",
+        "default": "https://dashscope.aliyuncs.com"
+      },
+      "api_key": {
+        "description": "百炼 API Key",
+        "type": "string",
+        "default": "",
+        "secret": true,
+        "obvious_hint": true
+      },
+      "model": {
+        "description": "模型名称",
+        "type": "string",
+        "hint": "qwen-image-* 走同步多模态生成；wan* / wanx* 走异步文生图任务。⚠️ qwen-image-edit-* 是图像编辑模型，必须带参考图才能用，纯文字生图请选 qwen-image-2.0 / qwen-image-3.0",
+        "default": "qwen-image-2.0",
+        "options": [
+          "qwen-image-2.0",
+          "qwen-image-2.0-pro",
+          "qwen-image-3.0",
+          "qwen-image-3.0-pro",
+          "qwen-image-max",
+          "qwen-image-edit-max",
+          "qwen-image-edit-plus",
+          "wan2.7-image",
+          "wan2.7-image-pro",
+          "z-image-turbo"
+        ]
+      },
+      "size": {
+        "description": "输出尺寸",
+        "type": "string",
+        "hint": "用 * 分隔，如 1328*1328。留空则交给服务端默认值（推荐，各模型支持的尺寸集合不同）",
+        "default": ""
+      },
+      "watermark": {
+        "description": "添加水印",
+        "type": "bool",
+        "hint": "不设置则不发送该字段",
+        "default": false
+      },
+      "prompt_extend": {
+        "description": "启用提示词智能改写",
+        "type": "bool",
+        "default": false
+      },
+      "poll_interval": {
+        "description": "异步任务轮询间隔（秒）",
+        "type": "float",
+        "default": 2.0
+      },
+      "max_wait": {
+        "description": "异步任务最长等待（秒）",
+        "type": "int",
+        "default": 180
+      },
+      "api_style": {
+        "description": "调用协议",
+        "type": "string",
+        "hint": "auto=按模型名自动选择；multimodal=强制同步多模态；text2image=强制异步任务",
+        "default": "auto",
+        "options": ["auto", "multimodal", "text2image"]
+      },
+      "timeout": {"description": "请求超时（秒）", "type": "int", "default": 180},
+      "extra_headers": {"description": "附加请求头", "type": "dict", "items": {}, "default": {}},
+      "extra_body": {"description": "附加请求体字段", "type": "dict", "items": {}, "default": {}},
+      "proxy": {"description": "HTTP(S) 代理", "type": "string", "default": ""},
+      "verify_ssl": {"description": "校验 TLS 证书", "type": "bool", "default": true},
+      "force_download": {"description": "强制代为下载图片", "type": "bool", "default": false}
+    }
+  }
+}

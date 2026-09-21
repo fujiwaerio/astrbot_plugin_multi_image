@@ -1,0 +1,33 @@
+# Python 产物
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+build/
+dist/
+*.egg-info/
+
+# 虚拟环境
+.venv/
+venv/
+env/
+
+# 测试与覆盖率
+.pytest_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# 编辑器与系统
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# 插件运行期产物
+# AstrBot 会把插件配置与持久化数据写在 data/ 下，插件自身目录不应包含它们。
+*_config.json
+data/
+cache/
+logs/
