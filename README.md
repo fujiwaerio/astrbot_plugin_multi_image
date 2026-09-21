@@ -667,6 +667,9 @@ AstrBot 插件实现交叉核对后确定的，核对对象包括即梦 `session
 仓库由 [fujiwaerio](https://github.com/fujiwaerio) 创建与维护，需求提出、方案取舍与
 最终验收由仓库维护者负责。
 
+声明：正如dsh所说从生成验证测试都是dsh干的，我只是一个玩AI的小白，如果有什么想法或者帮助我和报错可以来
+QQ 1107471744
+
 ## 许可证
 
 本项目采用 [MIT 许可证](LICENSE)，版权归 DeepSeek Harness 所有。
