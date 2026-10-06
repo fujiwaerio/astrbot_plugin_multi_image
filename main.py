@@ -38,6 +38,7 @@ from collections.abc import AsyncGenerator
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, ClassVar
+from urllib.parse import urlparse
 
 import astrbot.api.message_components as Comp
 from astrbot.api import logger
@@ -85,7 +86,7 @@ except ImportError:  # pragma: no cover - 兼容旧版以模块方式加载的 A
     )
 
 PLUGIN_NAME = "astrbot_plugin_multi_image"
-PLUGIN_VERSION = "0.1.1"
+PLUGIN_VERSION = "0.1.2"
 
 #: 解析参数时用于识别并剥离指令本身。每新增一个指令都要登记到这里，
 #: 否则 ``extract_raw_arguments`` 会把指令词当成参数内容返回。
@@ -1197,19 +1198,46 @@ class MultiImagePlugin(Star):
 
         if image.url:
             config = self._build_provider_config(provider_name, DrawArguments())
-            headers: dict[str, str] = {}
-            if config.api_key:
-                headers["Authorization"] = f"Bearer {config.api_key}"
-            headers.update(config.extra_headers)
+            headers = self._download_headers(image.url, config)
             async with build_client(config) as client:
-                image = await download_image(
-                    client,
-                    image.url,
-                    provider_label=provider_name,
-                    headers=headers,
-                )
+                try:
+                    image = await download_image(
+                        client,
+                        image.url,
+                        provider_label=provider_name,
+                        headers=headers,
+                    )
+                except ImageGenerationError:
+                    # 有的图床对"带了鉴权头的外来请求"直接回 401，
+                    # 去掉头反而是公开可下的，所以再裸试一次。
+                    if "Authorization" not in headers:
+                        raise
+                    fallback = {k: v for k, v in headers.items() if k != "Authorization"}
+                    logger.debug(
+                        "[multi_image] 带鉴权头下载失败，去掉后用裸请求重试：%s", image.url
+                    )
+                    image = await download_image(
+                        client,
+                        image.url,
+                        provider_label=provider_name,
+                        headers=fallback,
+                    )
 
         return self._write_cache(image)
+
+    @staticmethod
+    def _download_headers(image_url: str, config: ProviderConfig) -> dict[str, str]:
+        """构造下载图片时该带的请求头。
+
+        只有图片和接口**同源**时才附带渠道密钥：中转站的图床常挂在第三方域名
+        （对象存储/CDN）上，把密钥发过去会被判成鉴权失败直接 401——
+        实测 agnes 图床就是如此（带头 401、不带头 200）。
+        """
+        headers: dict[str, str] = {}
+        if config.api_key and _same_host(image_url, config.api_base):
+            headers["Authorization"] = f"Bearer {config.api_key}"
+        headers.update(config.extra_headers)
+        return headers
 
     def _write_cache(self, image: GeneratedImage) -> str:
         """把 Base64 图片写入缓存目录并返回绝对路径。"""
@@ -1552,3 +1580,21 @@ def _suffix_for_mime(mime_type: str) -> str:
         "image/gif": ".gif",
         "image/bmp": ".bmp",
     }.get((mime_type or "").lower(), ".png")
+
+
+def _same_host(first: str, second: str) -> bool:
+    """判断两个 URL 是否同源（协议 + 主机 + 端口）。
+
+    用于决定"要不要把渠道密钥发给这个地址"：同源才发。
+    图床挂在第三方对象存储上是常态，把密钥发过去会被判成鉴权失败。
+    """
+    try:
+        left, right = urlparse(first), urlparse(second)
+    except ValueError:
+        return False
+    if not left.netloc or not right.netloc:
+        return False
+    return (left.scheme.lower(), left.netloc.lower()) == (
+        right.scheme.lower(),
+        right.netloc.lower(),
+    )

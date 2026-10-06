@@ -364,8 +364,10 @@ def _retry_wait(attempt: int, response: httpx.Response | None) -> float:
 def describe_http_error(response: httpx.Response, provider_label: str) -> str:
     """从错误响应里抽出最有信息量的一句话。
 
-    优先取 JSON 错误体里的 ``error.message`` / ``message`` / ``msg`` / ``detail``，
-    取不到就退回截断后的纯文本。
+    优先取 JSON 错误体里的 ``error.message`` / ``message`` / ``msg`` / ``detail``；
+    如果是网页（中转站被 Cloudflare 之类的网关挡下来时的常见返回），
+    就只取标题与 Ray ID——**绝不把整页 HTML 丢进群聊**；
+    其余情况退回截断后的纯文本。
 
     @author DeepSeek Harness
     """
@@ -378,11 +380,62 @@ def describe_http_error(response: httpx.Response, provider_label: str) -> str:
     if isinstance(payload, Mapping):
         detail = _dig_error_message(payload)
     if not detail:
-        detail = (response.text or "").strip()
+        detail = _describe_text_body(response)
 
     detail = re.sub(r"\s+", " ", detail)[:400]
     prefix = f"{provider_label} 接口返回 HTTP {response.status_code}"
     return f"{prefix}：{detail}" if detail else prefix
+
+
+#: 一眼看出响应体是网页而不是 API 错误体的特征。
+_HTML_BODY_RE = re.compile(r"<\s*(?:!doctype|html|head|body|title)\b", re.IGNORECASE)
+
+#: 网页错误页的标题，通常就是"谁挡的、什么错"。
+_HTML_TITLE_RE = re.compile(r"<title[^>]*>(.*?)</title>", re.IGNORECASE | re.DOTALL)
+
+#: Cloudflare 的 Ray ID：报障时中转站站长第一个要的就是它。
+#:
+#: 真实页面里 ID 是包在标签里的（``Ray ID: <strong …>a4452f156a12ef23</strong>``），
+#: 所以中间要允许跳过标签，否则只能干看着那个 ID 抓不到。
+_RAY_ID_RE = re.compile(
+    r"Ray\s+ID:?\s*(?:<[^>]{0,120}>\s*)*([0-9a-f]{8,})",
+    re.IGNORECASE,
+)
+
+#: 网关类状态码的人话解释。中转站后端挂掉时最常见的就是这几个。
+_GATEWAY_HINTS: dict[int, str] = {
+    502: "网关错误，通常是对面后端暂时不可用",
+    503: "服务暂时不可用，可能在重启或过载",
+    504: "网关超时，对面后端没在规定时间内响应",
+}
+
+
+def _describe_text_body(response: httpx.Response) -> str:
+    """非 JSON 响应体的一句话摘要。
+
+    Cloudflare 的 502 页面有 6 KB 的 HTML，直接塞给用户既看不懂也刷屏。
+    这里只留标题 + Ray ID，再补一句状态码的含义。
+    """
+    text = (response.text or "").strip()
+    if not text:
+        return ""
+
+    if _HTML_BODY_RE.search(text[:600]):
+        parts: list[str] = []
+        title = _HTML_TITLE_RE.search(text)
+        if title:
+            cleaned = re.sub(r"\s+", " ", title.group(1)).strip()
+            if cleaned:
+                parts.append(cleaned)
+        ray_id = _RAY_ID_RE.search(text)
+        if ray_id:
+            parts.append(f"Ray ID {ray_id.group(1)}")
+
+        summary = "；".join(parts) if parts else "上游返回了网页形式的错误页"
+        hint = _GATEWAY_HINTS.get(response.status_code)
+        return f"{summary}（{hint}）" if hint else summary
+
+    return text
 
 
 def _dig_error_message(payload: Mapping[str, Any]) -> str:
