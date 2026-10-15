@@ -21,7 +21,6 @@ ComfyUI 不是"一个请求换一张图"的接口，完整链路是四步，
 from __future__ import annotations
 
 import asyncio
-import base64
 import json
 import re
 import time
@@ -38,7 +37,13 @@ from .base import (
     ImageGenerationRequest,
     ImageProvider,
 )
-from .http import HttpRequestFailed, json_headers, send_request, sniff_mime
+from .http import (
+    HttpRequestFailed,
+    auth_headers,
+    download_image,
+    json_headers,
+    send_request,
+)
 
 __all__ = ["ComfyUIProvider", "WorkflowTemplate", "parse_workflow_templates"]
 
@@ -59,6 +64,9 @@ _SAMPLER_NODE_TYPES = ("KSampler", "KSamplerAdvanced", "SamplerCustom", "KSample
 
 #: 参考图输入节点类型。
 _LOAD_IMAGE_NODE_TYPES = ("LoadImage", "LoadImageMask", "ImageLoad")
+
+#: 轮询时连续多少次拿不到 JSON 就判定这条链路不通（避免白等满 max_wait）。
+_MAX_BLANK_POLLS = 3
 
 #: 工作流文本里支持的占位符。
 _PLACEHOLDER_RE = re.compile(r"\{\{\s*(\w+)\s*\}\}")
@@ -466,6 +474,7 @@ class ComfyUIProvider(ImageProvider):
         """轮询 ``/history/{prompt_id}`` 直到任务完成或超时。"""
         interval = max(0.2, float(self.config.option("poll_interval", 1.0)))
         deadline = time.monotonic() + max(1.0, float(self.config.option("max_wait", 300.0)))
+        blank_polls = 0
 
         while True:
             try:
@@ -488,7 +497,18 @@ class ComfyUIProvider(ImageProvider):
                 try:
                     payload = response.json()
                 except (ValueError, TypeError):
+                    # 反代/网关把接口挡下来时会返回 HTML。偶发一次可以继续等，
+                    # 但一直不是 JSON 就说明这条链路根本不通——不能白等满 max_wait。
+                    blank_polls += 1
+                    if blank_polls >= _MAX_BLANK_POLLS:
+                        preview = " ".join((response.text or "").split())[:80]
+                        raise ImageGenerationError(
+                            f"ComfyUI 查询接口连续 {blank_polls} 次没有返回 JSON"
+                            f"（可能被反向代理或网关拦截）：{preview}"
+                        ) from None
                     payload = {}
+                else:
+                    blank_polls = 0
                 entry = payload.get(prompt_id) if isinstance(payload, dict) else None
                 if isinstance(entry, dict):
                     status = entry.get("status") or {}
@@ -546,39 +566,29 @@ class ComfyUIProvider(ImageProvider):
         base: str,
         item: dict[str, Any],
     ) -> GeneratedImage:
-        """调用 ``/view`` 取回单张图片。"""
+        """调用 ``/view`` 取回单张图片。
+
+        走共享的 :func:`download_image`，这样体积上限、重试次数与 MIME 嗅探
+        与其他渠道是同一份实现——4K / 多图工作流的输出最容易撑爆内存。
+        """
         filename = str(item.get("filename") or "")
         if not filename:
             raise ImageGenerationError("ComfyUI 输出里缺少 filename")
-        params = {
-            "filename": filename,
-            "subfolder": str(item.get("subfolder") or ""),
-            "type": str(item.get("type") or "output"),
-        }
-        response = await send_request(
+        return await download_image(
             client,
-            "GET",
             f"{base}/view",
             provider_label=f"{self.label} 下载图片",
             headers=self._auth_headers(),
-            params=params,
+            params={
+                "filename": filename,
+                "subfolder": str(item.get("subfolder") or ""),
+                "type": str(item.get("type") or "output"),
+            },
         )
-        content = response.content
-        if not content:
-            raise ImageGenerationError(f"ComfyUI /view 返回空内容：{filename}")
-        header_mime = (response.headers.get("Content-Type") or "").split(";")[0].strip()
-        mime = sniff_mime(content, header_mime or "image/png")
-        return GeneratedImage.from_base64(base64.b64encode(content).decode("ascii"), mime)
 
     def _auth_headers(self) -> dict[str, str]:
         """ComfyUI 默认无鉴权，配置了 api_key / extra_headers 时才带。"""
-        headers: dict[str, str] = {}
-        if self.config.api_key:
-            headers["Authorization"] = f"Bearer {self.config.api_key}"
-        for key, value in (self.config.extra_headers or {}).items():
-            if value is not None:
-                headers[key] = value
-        return headers
+        return auth_headers(self.config)
 
 
 def _is_failed(status: Any) -> bool:

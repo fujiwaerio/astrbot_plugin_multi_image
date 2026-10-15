@@ -31,7 +31,7 @@ from .base import (
     ImageGenerationRequest,
     ImageProvider,
 )
-from .http import HttpRequestFailed, extract_images, resolve_endpoint, send_request
+from .http import HttpRequestFailed, auth_headers, extract_images, resolve_endpoint, send_request
 
 __all__ = ["DashScopeProvider", "clean_dashscope_base"]
 
@@ -356,12 +356,4 @@ class DashScopeProvider(ImageProvider):
 
     def _headers(self, extra: dict[str, str] | None = None) -> dict[str, str]:
         """百炼用标准 Bearer 鉴权。"""
-        headers: dict[str, str] = {"Content-Type": "application/json"}
-        if self.config.api_key:
-            headers["Authorization"] = f"Bearer {self.config.api_key}"
-        if extra:
-            headers.update(extra)
-        for key, value in (self.config.extra_headers or {}).items():
-            if value is not None:
-                headers[key] = value
-        return headers
+        return auth_headers(self.config, extra, content_type="application/json")

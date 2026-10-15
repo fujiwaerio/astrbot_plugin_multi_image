@@ -35,6 +35,7 @@ from .base import (
 from .http import (
     HttpRequestFailed,
     absolutize_url,
+    auth_headers,
     extract_images,
     json_headers,
     resolve_endpoint,
@@ -346,16 +347,7 @@ class OpenAICompatibleProvider(ImageProvider):
     # ------------------------------------------------------------------ #
     def _multipart_headers(self) -> dict[str, str]:
         """multipart 请求只需要鉴权头，Content-Type 由 httpx 生成。"""
-        headers = {
-            key: value
-            for key, value in (self.config.extra_headers or {}).items()
-            if value is not None
-        }
-        if self.config.api_key and not any(
-            key.lower() in ("authorization", "x-api-key") for key in headers
-        ):
-            headers["Authorization"] = f"Bearer {self.config.api_key}"
-        return headers
+        return auth_headers(self.config)
 
     @staticmethod
     def _build_edit_files(

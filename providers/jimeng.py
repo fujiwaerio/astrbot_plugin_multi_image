@@ -29,7 +29,7 @@ from .base import (
     ImageGenerationRequest,
     ReferenceImage,
 )
-from .http import HttpRequestFailed, resolve_endpoint, send_request
+from .http import HttpRequestFailed, auth_headers, resolve_endpoint, send_request
 from .openai_image import OpenAICompatibleProvider
 
 __all__ = ["JimengProvider"]
@@ -210,13 +210,7 @@ class JimengProvider(OpenAICompatibleProvider):
     # ------------------------------------------------------------------ #
     def _bearer_headers(self) -> dict[str, str]:
         """即梦统一用 Bearer sessionid 鉴权。"""
-        headers: dict[str, str] = {"Content-Type": "application/json"}
-        if self.config.api_key:
-            headers["Authorization"] = f"Bearer {self.config.api_key}"
-        for key, value in (self.config.extra_headers or {}).items():
-            if value is not None:
-                headers[key] = value
-        return headers
+        return auth_headers(self.config, content_type="application/json")
 
     def tokens(self) -> list[str]:
         """把 ``api_key`` 拆成一个或多个 sessionid。"""

@@ -216,6 +216,13 @@
         "hint": "例如 gemini-2.5-flash-image；imagen-* 会自动改走 :predict 接口",
         "default": "gemini-2.5-flash-image"
       },
+      "ratio": {
+        "description": "默认画面比例",
+        "type": "string",
+        "hint": "留空则按图片宽高自动换算；也可用 /draw gemini --ratio 16:9 单次指定。原生协议下需要同时开启「始终发送画面比例」才会带上",
+        "default": "",
+        "options": ["", "1:1", "4:3", "3:4", "16:9", "9:16", "3:2", "2:3", "21:9"]
+      },
       "api_style": {
         "description": "调用协议",
         "type": "string",

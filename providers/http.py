@@ -325,16 +325,39 @@ def _build_headers(
     return headers
 
 
-def auth_headers(config: ProviderConfig, extra: Mapping[str, str] | None = None) -> dict[str, str]:
-    """构造 Bearer 鉴权请求头（``extra_headers`` 可覆盖）。
+#: 凭证类请求头。用户已在 ``extra_headers`` 里配了任意一个，就不再叠加我们自己的
+#: —— 中转站常要求自带 ``x-api-key``，多送一个 ``Authorization`` 会被判成鉴权失败。
+_CREDENTIAL_HEADERS = ("authorization", "x-api-key", "x-goog-api-key")
+
+
+def auth_headers(
+    config: ProviderConfig,
+    extra: Mapping[str, str] | None = None,
+    *,
+    content_type: str = "",
+    key_header: str = "Authorization",
+    scheme: str = "Bearer",
+) -> dict[str, str]:
+    """构造请求头：``extra_headers`` 优先，渠道凭证头只在没有同类凭证时补。
+
+    所有适配器的鉴权头都走这一个实现，避免"该不该加自己的凭证头"这条规则
+    被复制成多份之后各自分叉。
+
+    Args:
+        config: 渠道配置。``api_key`` 为空时不补任何凭证头。
+        extra: 本次调用附加的头，优先级低于 ``config.extra_headers``。
+        content_type: 非空时补上 ``Content-Type``（已存在则不覆盖）。
+        key_header: 凭证头名字。百炼 / 即梦 / ComfyUI 用 ``Authorization``，
+            Gemini 原生协议用 ``x-goog-api-key``。
+        scheme: 凭证头前缀。Gemini 原生不需要前缀时传空字符串。
 
     @author DeepSeek Harness
     """
     headers = _build_headers(config, extra)
-    if config.api_key and not any(
-        key.lower() in ("authorization", "x-api-key", "x-goog-api-key") for key in headers
-    ):
-        headers["Authorization"] = f"Bearer {config.api_key}"
+    if content_type:
+        headers.setdefault("Content-Type", content_type)
+    if config.api_key and not any(key.lower() in _CREDENTIAL_HEADERS for key in headers):
+        headers[key_header] = f"{scheme} {config.api_key}".strip()
     return headers
 
 
@@ -521,8 +544,11 @@ async def send_request(
                 cause=exc,
             )
         except httpx.HTTPError as exc:
+            # 有些 httpx 异常的 ``str()`` 是空的（连接被重置之类），
+            # 直接拼进去会得到「网络请求失败（url）：」这种断在半截的消息。
+            reason = str(exc).strip() or type(exc).__name__
             last_error = HttpRequestFailed(
-                f"{provider_label} 网络请求失败（{_safe_url(url)}）：{exc}",
+                f"{provider_label} 网络请求失败（{_safe_url(url)}）：{reason}",
                 cause=exc,
             )
         else:
@@ -763,12 +789,14 @@ async def download_image(
     *,
     provider_label: str,
     headers: Mapping[str, str] | None = None,
+    params: Mapping[str, Any] | None = None,
     max_bytes: int = 20 * 1024 * 1024,
 ) -> GeneratedImage:
     """下载远程图片并转成 Base64 结果。
 
     用于中转站返回的图片链接需要鉴权（AstrBot 直接下载会 403）的场景，
-    由插件带鉴权头取回后落盘再发送。
+    由插件带鉴权头取回后落盘再发送。体积上限与重试策略都在这里，
+    各渠道不要再各写一份下载实现。
 
     @author DeepSeek Harness
     """
@@ -778,6 +806,7 @@ async def download_image(
         url,
         provider_label=f"{provider_label} 图片下载",
         headers=dict(headers or {}),
+        params=dict(params or {}),
         attempts=2,
     )
     content = response.content

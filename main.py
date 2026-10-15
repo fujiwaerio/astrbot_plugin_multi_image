@@ -86,7 +86,7 @@ except ImportError:  # pragma: no cover - 兼容旧版以模块方式加载的 A
     )
 
 PLUGIN_NAME = "astrbot_plugin_multi_image"
-PLUGIN_VERSION = "0.1.2"
+PLUGIN_VERSION = "0.1.3"
 
 #: 解析参数时用于识别并剥离指令本身。每新增一个指令都要登记到这里，
 #: 否则 ``extract_raw_arguments`` 会把指令词当成参数内容返回。

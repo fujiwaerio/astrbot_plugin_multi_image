@@ -33,6 +33,7 @@ from .base import (
 )
 from .http import (
     HttpRequestFailed,
+    auth_headers,
     extract_images,
     resolve_endpoint,
     send_request,
@@ -151,6 +152,9 @@ class GeminiProvider(ImageProvider):
             layer: OpenAICompatibleProvider = _GeminiOpenAILayer(config)
         else:
             layer = OpenAICompatibleProvider(config)
+        # 回退层是另一个类，类属性 name 还停在 "base"；不补上就会报出
+        # 「Gemini(base) 接口返回 HTTP xxx」这种对不上渠道的错误消息。
+        layer.name = self.name
         layer.display_name = self.display_name
         return layer
 
@@ -302,14 +306,13 @@ class GeminiProvider(ImageProvider):
         return "9:16" if height / width >= 1.5 else "3:4"
 
     def _native_headers(self) -> dict[str, str]:
-        """原生协议用 ``x-goog-api-key`` 鉴权。"""
-        headers: dict[str, str] = {"Content-Type": "application/json"}
-        if self.config.api_key:
-            headers["x-goog-api-key"] = self.config.api_key
-        for key, value in (self.config.extra_headers or {}).items():
-            if value is not None:
-                headers[key] = value
-        return headers
+        """原生协议用 ``x-goog-api-key`` 鉴权（不带 ``Bearer`` 前缀）。"""
+        return auth_headers(
+            self.config,
+            content_type="application/json",
+            key_header="x-goog-api-key",
+            scheme="",
+        )
 
     @staticmethod
     def _decode_json(response: httpx.Response, action: str) -> Any:
