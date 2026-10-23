@@ -12,6 +12,7 @@ import base64
 import binascii
 import re
 from abc import ABC, abstractmethod
+from copy import deepcopy
 from dataclasses import dataclass, field
 from typing import Any, ClassVar
 
@@ -85,6 +86,47 @@ def is_edit_model(model: str) -> bool:
 # --------------------------------------------------------------------------- #
 # 配置
 # --------------------------------------------------------------------------- #
+_CONTROLLED_BODY_FIELDS = frozenset(
+    {
+        "model",
+        "prompt",
+        "negative_prompt",
+        "negativePrompt",
+        "seed",
+        "size",
+        "width",
+        "height",
+        "aspect_ratio",
+        "aspectRatio",
+        "ratio",
+        "resolution",
+        "n",
+        "count",
+        "sampleCount",
+        "candidateCount",
+        "num_images",
+        "numImages",
+        "batch_size",
+        "image_count",
+        "watermark",
+        "prompt_extend",
+        "optimize_prompt_options",
+        "intelligent_ratio",
+        "sample_strength",
+        "messages",
+        "contents",
+        "input",
+        "instances",
+        "image",
+        "images",
+        "ref_img",
+        "stream",
+        "responseModalities",
+        "response_modalities",
+    }
+)
+
+
 @dataclass(slots=True)
 class ProviderConfig:
     """单个生图渠道的运行时配置。
@@ -117,7 +159,7 @@ class ProviderConfig:
     """附加请求头，用于自建中转站要求自定义鉴权头的场景。"""
 
     extra_body: dict[str, Any] = field(default_factory=dict)
-    """附加请求体字段，会与适配器生成的字段做浅合并（用户配置优先）。"""
+    """补充扩展字段；正式配置与命令管理的字段不允许被覆盖。"""
 
     proxy: str = ""
     """可选的 HTTP(S) 代理地址，海外中转站常用。"""
@@ -134,15 +176,33 @@ class ProviderConfig:
         return default if value is None else value
 
     def merged_body(self, payload: dict[str, Any]) -> dict[str, Any]:
-        """把用户的 ``extra_body`` 浅合并进适配器生成的请求体。
-
-        用户配置优先，这样中转站需要特殊字段时不用改代码。
-        """
+        """Merge extension fields while keeping configured request fields authoritative."""
         if not self.extra_body:
             return payload
-        merged = dict(payload)
-        merged.update(self.extra_body)
-        return merged
+
+        def merge(base: dict[str, Any], extensions: dict[str, Any]) -> dict[str, Any]:
+            merged = deepcopy(base)
+            for key, value in extensions.items():
+                if key in _CONTROLLED_BODY_FIELDS or (
+                    key == "imageSize"
+                    and self.name == "gemini"
+                    and self.api_style in {"auto", "native", "gemini", "google"}
+                ):
+                    continue
+                if key in {"parameters", "generationConfig", "imageConfig"}:
+                    if not isinstance(value, dict):
+                        continue
+                    original = merged.get(key, {})
+                    if not isinstance(original, dict):
+                        continue
+                    nested = merge(original, value)
+                    if nested or key in merged:
+                        merged[key] = nested
+                else:
+                    merged[key] = deepcopy(value)
+            return merged
+
+        return merge(payload, self.extra_body)
 
 
 # --------------------------------------------------------------------------- #
@@ -177,7 +237,9 @@ class ReferenceImage:
     def to_base64(self) -> str:
         """返回不带 ``data:`` 前缀的 Base64 字符串。"""
         if not self.data:
-            raise ImageGenerationError("该参考图只有 URL 没有图片本体，无法转换为 Base64")
+            raise ImageGenerationError(
+                "该参考图只有 URL 没有图片本体，无法转换为 Base64"
+            )
         return base64.b64encode(self.data).decode("ascii")
 
     def to_data_uri(self) -> str:
@@ -284,8 +346,7 @@ def strip_data_uri(value: str) -> str:
     @author DeepSeek Harness
     """
     text = (value or "").strip()
-    if text.startswith("base64://"):
-        text = text[len("base64://") :]
+    text = text.removeprefix("base64://")
     if text.startswith("data:"):
         _, _, text = text.partition(",")
     return "".join(text.split())
@@ -368,7 +429,9 @@ class ImageProvider(ABC):
         """返回 API 地址，未配置时抛出可读异常。"""
         base = (self.config.api_base or self.default_api_base).strip()
         if not base:
-            raise ProviderNotConfiguredError(f"{self.label} 未配置 API 地址（api_base）")
+            raise ProviderNotConfiguredError(
+                f"{self.label} 未配置 API 地址（api_base）"
+            )
         return base
 
     def require_api_key(self) -> str:

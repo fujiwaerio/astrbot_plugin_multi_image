@@ -321,7 +321,9 @@ def _build_headers(
     headers: dict[str, str] = {}
     if extra:
         headers.update({k: v for k, v in extra.items() if v is not None})
-    headers.update({k: v for k, v in (config.extra_headers or {}).items() if v is not None})
+    headers.update(
+        {k: v for k, v in (config.extra_headers or {}).items() if v is not None}
+    )
     return headers
 
 
@@ -356,12 +358,16 @@ def auth_headers(
     headers = _build_headers(config, extra)
     if content_type:
         headers.setdefault("Content-Type", content_type)
-    if config.api_key and not any(key.lower() in _CREDENTIAL_HEADERS for key in headers):
+    if config.api_key and not any(
+        key.lower() in _CREDENTIAL_HEADERS for key in headers
+    ):
         headers[key_header] = f"{scheme} {config.api_key}".strip()
     return headers
 
 
-def json_headers(config: ProviderConfig, extra: Mapping[str, str] | None = None) -> dict[str, str]:
+def json_headers(
+    config: ProviderConfig, extra: Mapping[str, str] | None = None
+) -> dict[str, str]:
     """构造 JSON 请求头。"""
     headers = auth_headers(config, extra)
     headers.setdefault("Content-Type", "application/json")
@@ -792,34 +798,134 @@ async def download_image(
     params: Mapping[str, Any] | None = None,
     max_bytes: int = 20 * 1024 * 1024,
 ) -> GeneratedImage:
-    """下载远程图片并转成 Base64 结果。
+    """有界下载图片，跨源重定向不转发任何自定义凭证头。
 
-    用于中转站返回的图片链接需要鉴权（AstrBot 直接下载会 403）的场景，
-    由插件带鉴权头取回后落盘再发送。体积上限与重试策略都在这里，
-    各渠道不要再各写一份下载实现。
+    Args:
+        client: 沿用渠道代理、TLS 与超时设置的异步客户端。
+        url: 图片地址。
+        provider_label: 错误提示中的渠道名称。
+        headers: 首次请求的鉴权及附加请求头。
+        params: 首次请求的查询参数，例如 ComfyUI 文件信息。
+        max_bytes: 解压后允许读取的最大字节数。
 
-    @author DeepSeek Harness
+    Returns:
+        已下载并转换为 Base64 的图片。
+
+    Raises:
+        ImageGenerationError: 地址无效、图片为空、超限或重定向过多。
+        HttpRequestFailed: 请求失败且重试无效。
     """
-    response = await send_request(
-        client,
-        "GET",
-        url,
-        provider_label=f"{provider_label} 图片下载",
-        headers=dict(headers or {}),
-        params=dict(params or {}),
-        attempts=2,
+    try:
+        initial_url = httpx.URL(url).copy_merge_params(params or {})
+        if (
+            initial_url.scheme not in {"http", "https"}
+            or not initial_url.host
+            or initial_url.userinfo
+        ):
+            raise ValueError
+    except (ValueError, httpx.InvalidURL):
+        raise ImageGenerationError(f"{provider_label} 图片地址无效") from None
+    if max_bytes <= 0:
+        raise ImageGenerationError("图片下载大小上限必须大于零")
+    size_limit = (
+        f"{max_bytes / (1024 * 1024):g}MB"
+        if max_bytes >= 1024 * 1024
+        else f"{max_bytes} 字节"
     )
-    content = response.content
-    if len(content) > max_bytes:
-        raise ImageGenerationError(
-            f"{provider_label} 返回的图片超过 {max_bytes // (1024 * 1024)}MB 上限"
-        )
-    if not content:
-        raise ImageGenerationError(f"{provider_label} 图片下载结果为空")
+    limit_error = f"{provider_label} 返回的图片超过 {size_limit} 上限"
 
-    header_mime = (response.headers.get("Content-Type") or "").split(";")[0].strip()
-    mime = sniff_mime(content, header_mime or "image/png")
-    return GeneratedImage.from_base64(base64.b64encode(content).decode("ascii"), mime)
+    for attempt in range(2):
+        current_url = initial_url
+        current_headers = dict(client.headers)
+        current_headers.update(headers or {})
+        response: httpx.Response | None = None
+        try:
+            for redirect in range(6):
+                # 显式构造请求，防止跨源跳转后 AsyncClient 再次合并默认凭证头。
+                outgoing = httpx.Request("GET", current_url, headers=current_headers)
+                response = await client.send(
+                    outgoing, stream=True, follow_redirects=False
+                )
+                try:
+                    if response.status_code in {301, 302, 303, 307, 308}:
+                        location = response.headers.get("Location")
+                        if not location or redirect == 5:
+                            raise ImageGenerationError(
+                                f"{provider_label} 图片下载重定向无效或次数过多"
+                            )
+                        try:
+                            target = response.url.join(location)
+                        except (ValueError, httpx.InvalidURL):
+                            raise ImageGenerationError(
+                                f"{provider_label} 图片重定向地址无效"
+                            ) from None
+                        if (
+                            target.scheme not in {"http", "https"}
+                            or not target.host
+                            or target.userinfo
+                        ):
+                            raise ImageGenerationError(
+                                f"{provider_label} 图片重定向地址无效"
+                            )
+                        if (current_url.scheme, current_url.host, current_url.port) != (
+                            target.scheme,
+                            target.host,
+                            target.port,
+                        ):
+                            # 未知名称的私有头也可能包含凭证，因此仅保留公开的协商头。
+                            current_headers = {
+                                key: value
+                                for key, value in current_headers.items()
+                                if key.lower()
+                                in {"accept", "accept-encoding", "user-agent"}
+                            }
+                        current_url = target
+                        continue
+                    if not response.is_success:
+                        raise HttpRequestFailed(
+                            f"{provider_label} 图片下载返回 HTTP {response.status_code}",
+                            status_code=response.status_code,
+                        )
+                    try:
+                        declared_size = int(response.headers.get("Content-Length", "0"))
+                    except ValueError:
+                        declared_size = 0
+                    if declared_size > max_bytes:
+                        raise ImageGenerationError(limit_error)
+                    content = bytearray()
+                    async for chunk in response.aiter_bytes():
+                        if len(content) + len(chunk) > max_bytes:
+                            raise ImageGenerationError(limit_error)
+                        content.extend(chunk)
+                    if not content:
+                        raise ImageGenerationError(f"{provider_label} 图片下载结果为空")
+                    header_mime = (
+                        (response.headers.get("Content-Type") or "")
+                        .split(";")[0]
+                        .strip()
+                    )
+                    mime = sniff_mime(content, header_mime or "image/png")
+                    return GeneratedImage.from_base64(
+                        base64.b64encode(content).decode("ascii"), mime
+                    )
+                finally:
+                    await response.aclose()
+        except HttpRequestFailed as exc:
+            if exc.status_code not in RETRY_STATUSES or attempt == 1:
+                raise
+        except httpx.TimeoutException as exc:
+            if attempt == 1:
+                raise HttpRequestFailed(
+                    f"{provider_label} 图片下载超时", cause=exc
+                ) from exc
+        except httpx.RequestError as exc:
+            if attempt == 1:
+                raise HttpRequestFailed(
+                    f"{provider_label} 图片下载网络或协议错误", cause=exc
+                ) from exc
+        await asyncio.sleep(_retry_wait(attempt + 1, response))
+
+    raise ImageGenerationError(f"{provider_label} 图片下载未完成")  # pragma: no cover
 
 
 def ensure_mapping(value: Any) -> dict[str, Any]:

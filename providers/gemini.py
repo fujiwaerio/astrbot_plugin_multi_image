@@ -45,7 +45,9 @@ __all__ = ["GeminiProvider"]
 
 #: 用户可能直接粘贴了完整接口地址，这里把末尾的模型段与方法段剥掉。
 _MODEL_PATH_RE = re.compile(r"/models/[^/]+(?::\w+)?$", re.IGNORECASE)
-_METHOD_SUFFIX_RE = re.compile(r":(generateContent|predict|streamGenerateContent)$", re.IGNORECASE)
+_METHOD_SUFFIX_RE = re.compile(
+    r":(generateContent|predict|streamGenerateContent)$", re.IGNORECASE
+)
 
 
 def _clean_gemini_base(base: str) -> str:
@@ -104,6 +106,8 @@ class GeminiProvider(ImageProvider):
         failures: list[str] = []
 
         for style in self.resolve_styles(model):
+            if self.config.option("native_size_mode") and style != "native":
+                continue
             try:
                 if style == "native":
                     return await self._generate_native(request, client, base, model)
@@ -186,16 +190,24 @@ class GeminiProvider(ImageProvider):
             f"/models/{model}:generateContent",
             self.api_version,
         )
-        payload: dict[str, Any] = {"contents": [{"role": "user", "parts": self._parts(request)}]}
+        payload: dict[str, Any] = {
+            "contents": [{"role": "user", "parts": self._parts(request)}]
+        }
 
         generation_config: dict[str, Any] = {
             "responseModalities": self._response_modalities(),
         }
         aspect_ratio = self._aspect_ratio_option(request)
-        if aspect_ratio:
+        image_size = str(self.config.option("image_size", "") or "")
+        if aspect_ratio or image_size:
             # 注意：不支持 imageConfig 的模型传这个字段会**直接报错**（不是忽略），
             # 所以只有用户显式要求时才带。
-            generation_config["imageConfig"] = {"aspectRatio": aspect_ratio}
+            image_config = {}
+            if aspect_ratio:
+                image_config["aspectRatio"] = aspect_ratio
+            if image_size:
+                image_config["imageSize"] = image_size
+            generation_config["imageConfig"] = image_config
         payload["generationConfig"] = generation_config
 
         payload = self.config.merged_body(payload)
@@ -245,14 +257,14 @@ class GeminiProvider(ImageProvider):
                 "mimeType": reference.mime_type,
             }
 
+        parameters: dict[str, Any] = {"sampleCount": max(1, int(request.count))}
+        ratio = str(self.config.option("ratio", "") or "")
+        if not ratio and not self.config.option("native_size_mode"):
+            ratio = self._aspect_ratio(request)
+        if ratio:
+            parameters["aspectRatio"] = ratio
         payload = self.config.merged_body(
-            {
-                "instances": [instance],
-                "parameters": {
-                    "sampleCount": max(1, int(request.count)),
-                    "aspectRatio": self._aspect_ratio(request),
-                },
-            }
+            {"instances": [instance], "parameters": parameters}
         )
 
         response = await send_request(
@@ -287,7 +299,9 @@ class GeminiProvider(ImageProvider):
         """读取 ``response_modalities`` 选项，默认同时返回文本与图片。"""
         configured = self.config.option("response_modalities")
         if isinstance(configured, str) and configured.strip():
-            items = [item.strip().upper() for item in configured.split(",") if item.strip()]
+            items = [
+                item.strip().upper() for item in configured.split(",") if item.strip()
+            ]
             if items:
                 return items
         if isinstance(configured, (list, tuple)) and configured:

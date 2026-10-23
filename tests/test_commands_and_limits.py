@@ -7,7 +7,8 @@ import os
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import AsyncMock, patch
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, Mock, patch
 
 import httpx
 from test_generation_flows import IMAGE_URL, PNG, WORKFLOW
@@ -577,3 +578,97 @@ class CommandsAndLimitsTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual((args.count, args.width, args.seed), (0, 0, None))
         for raw in ([100, "200"], "100，200", "100;200", "100 200"):
             self.assertEqual(self.module.normalize_ids(raw), {"100", "200"})
+
+
+class DataDirectoryTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.module = load_plugin()
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory(prefix="multi-image-storage-")
+        self.addCleanup(self.temp.cleanup)
+        self.data_root = Path(self.temp.name) / "custom-root" / "data"
+        self.expected = self.data_root / "plugin_data" / self.module.PLUGIN_NAME
+        self.plugin = self.module.MultiImagePlugin(object(), {})
+        self.primary = Mock(side_effect=OSError("StarTools unavailable"))
+        primary_patch = patch.object(
+            self.module, "StarTools", SimpleNamespace(get_data_dir=self.primary)
+        )
+        primary_patch.start()
+        self.addCleanup(primary_patch.stop)
+        fallback_patch = patch.object(
+            self.module, "get_astrbot_data_path", return_value=str(self.data_root)
+        )
+        self.fallback = fallback_patch.start()
+        self.addCleanup(fallback_patch.stop)
+
+    def test_primary_directory_remains_preferred_and_cached(self):
+        self.primary.side_effect = None
+        self.primary.return_value = self.expected
+        self.assertEqual(self.plugin._data_directory_path(), self.expected)
+        self.assertEqual(self.plugin._data_directory_path(), self.expected)
+        self.assertTrue(self.expected.is_dir())
+        self.primary.assert_called_once_with(self.module.PLUGIN_NAME)
+        self.fallback.assert_not_called()
+
+    def test_fallback_uses_framework_data_root_and_persists_across_instances(self):
+        self.assertTrue(self.plugin._set_group_channel(FakeEvent(), "gemini"))
+        reopened = self.module.MultiImagePlugin(object(), {})
+        self.assertEqual(reopened._group_channel(FakeEvent()), "gemini")
+        self.assertEqual(reopened._data_directory_path(), self.expected)
+        cached = Path(
+            reopened._write_cache(
+                GeneratedImage.from_base64(base64.b64encode(PNG).decode())
+            )
+        )
+        self.assertEqual(cached.parent, self.expected / "cache")
+        self.assertEqual(cached.read_bytes(), PNG)
+        self.assertEqual(reopened._temporary_files, {cached})
+
+    def test_missing_star_tools_method_still_uses_framework_data_root(self):
+        with patch.object(self.module, "StarTools", object()):
+            self.assertEqual(self.plugin._data_directory_path(), self.expected)
+        self.assertTrue(self.expected.is_dir())
+
+    def test_unwritable_directory_does_not_switch_storage_and_recovers(self):
+        self.plugin._group_channels = {"100": "gpt"}
+        with (
+            patch.object(
+                Path, "mkdir", side_effect=PermissionError("read-only")
+            ) as mkdir,
+            patch.object(Path, "write_text") as write,
+        ):
+            self.assertEqual(self.plugin._load_group_channels(), {})
+            self.assertFalse(self.plugin._set_group_channel(FakeEvent(), "gemini"))
+            self.assertEqual(self.plugin._group_channels, {"100": "gpt"})
+            self.assertIsNone(self.plugin._data_directory)
+            self.assertEqual(mkdir.call_count, 2)
+            write.assert_not_called()
+        self.assertFalse(self.expected.exists())
+        self.assertTrue(self.plugin._set_group_channel(FakeEvent(), "gemini"))
+        self.assertEqual(self.plugin._data_directory, self.expected)
+
+    def test_unavailable_path_helpers_are_handled_without_writing_files(self):
+        self.fallback.side_effect = RuntimeError("framework path unavailable")
+        with patch.object(Path, "write_text") as write:
+            self.assertEqual(self.plugin._load_group_channels(), {})
+            self.assertFalse(self.plugin._store_group_channels({"100": "gpt"}))
+            with self.assertRaisesRegex(ImageGenerationError, "AstrBot 数据目录"):
+                self.plugin._ensure_cache_dir()
+            write.assert_not_called()
+        self.assertIsNone(self.plugin._data_directory)
+        self.assertIsNone(self.plugin._cache_dir)
+
+    def test_unwritable_cache_reports_generation_error_without_tracking_files(self):
+        self.plugin._data_directory_path()
+        image = GeneratedImage.from_base64(base64.b64encode(PNG).decode())
+        with (
+            patch.object(Path, "mkdir", side_effect=PermissionError("cache read-only")),
+            patch.object(Path, "write_bytes") as write,
+        ):
+            with self.assertRaisesRegex(ImageGenerationError, "AstrBot 数据目录"):
+                self.plugin._write_cache(image)
+            write.assert_not_called()
+        self.assertEqual(self.plugin._temporary_files, set())
+        self.assertIsNone(self.plugin._cache_dir)

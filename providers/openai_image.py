@@ -311,7 +311,7 @@ class OpenAICompatibleProvider(ImageProvider):
             form["size"] = size
         if self.include_response_format:
             form.setdefault("response_format", "url")
-        for key, value in (self.config.extra_body or {}).items():
+        for key, value in self.config.merged_body(form).items():
             if isinstance(value, (str, int, float, bool)):
                 form[key] = str(value)
 
@@ -361,7 +361,12 @@ class OpenAICompatibleProvider(ImageProvider):
         files: list[tuple[str, tuple[str, bytes, str]]] = []
         for index, reference in enumerate(request.references):
             filename = reference.filename or f"image_{index}.png"
-            files.append(("image", (filename, reference.data, reference.mime_type or "image/png")))
+            files.append(
+                (
+                    "image",
+                    (filename, reference.data, reference.mime_type or "image/png"),
+                )
+            )
         return files
 
     async def _post_json(
@@ -439,7 +444,9 @@ class OpenAICompatibleProvider(ImageProvider):
             if image.url:
                 image.url = absolutize_url(image.url, base)
         if not images:
-            raise ImageGenerationError(f"{self.label} 未返回任何图片{_describe_data_errors(data)}")
+            raise ImageGenerationError(
+                f"{self.label} 未返回任何图片{_describe_data_errors(data)}"
+            )
         return images
 
 

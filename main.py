@@ -28,14 +28,17 @@
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import contextlib
+import hashlib
 import json
 import re
 import time
 import uuid
 from collections.abc import AsyncGenerator
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
+from datetime import datetime
 from pathlib import Path
 from typing import Any, ClassVar
 from urllib.parse import urlparse
@@ -44,8 +47,16 @@ import astrbot.api.message_components as Comp
 from astrbot.api import logger
 from astrbot.api.event import AstrMessageEvent, filter
 from astrbot.api.star import Context, Star, StarTools
+from astrbot.core.utils.astrbot_path import get_astrbot_data_path
 
-try:  # 新版 AstrBot 以包方式加载插件，可直接用相对导入
+if __package__:  # 按加载方式选择导入，避免把依赖缺失误判为旧版加载方式。
+    from .model_options import ModelOptions
+    from .parameter_presets import (
+        migrate_configuration,
+        parse_manual_dimensions,
+        resolve_manual_size,
+        resolve_preset,
+    )
     from .providers import (
         PROVIDER_CLASSES,
         GeneratedImage,
@@ -61,8 +72,29 @@ try:  # 新版 AstrBot 以包方式加载插件，可直接用相对导入
         supported_providers,
     )
     from .providers.comfyui import parse_workflow_templates
-    from .providers.http import build_client, download_image, ensure_mapping, sniff_mime
-except ImportError:  # pragma: no cover - 兼容旧版以模块方式加载的 AstrBot
+    from .providers.connection import ConnectionResult, test_connection
+    from .providers.http import (
+        HttpRequestFailed,
+        auth_headers,
+        build_client,
+        download_image,
+        ensure_mapping,
+        sniff_mime,
+    )
+    from .size_settings import (
+        apply_size_options,
+        migrate_size_settings,
+        prepare_size_schema,
+        validate_native_size,
+    )
+else:  # pragma: no cover - 兼容以独立模块方式进行本地调试。
+    from model_options import ModelOptions  # type: ignore[no-redef]
+    from parameter_presets import (  # type: ignore[no-redef]
+        migrate_configuration,
+        parse_manual_dimensions,
+        resolve_manual_size,
+        resolve_preset,
+    )
     from providers import (  # type: ignore[no-redef]
         PROVIDER_CLASSES,
         GeneratedImage,
@@ -78,15 +110,28 @@ except ImportError:  # pragma: no cover - 兼容旧版以模块方式加载的 A
         supported_providers,
     )
     from providers.comfyui import parse_workflow_templates  # type: ignore[no-redef]
+    from providers.connection import (  # type: ignore[no-redef]
+        ConnectionResult,
+        test_connection,
+    )
     from providers.http import (  # type: ignore[no-redef]
+        HttpRequestFailed,
+        auth_headers,
         build_client,
         download_image,
         ensure_mapping,
         sniff_mime,
     )
+    from size_settings import (
+        apply_size_options,
+        migrate_size_settings,
+        prepare_size_schema,
+        validate_native_size,
+    )
 
 PLUGIN_NAME = "astrbot_plugin_multi_image"
-PLUGIN_VERSION = "0.1.3"
+PLUGIN_VERSION = "0.2.0"
+_CONNECTION_RESULT_KEYS = ("connection_test_time", "connection_test_result")
 
 #: 解析参数时用于识别并剥离指令本身。每新增一个指令都要登记到这里，
 #: 否则 ``extract_raw_arguments`` 会把指令词当成参数内容返回。
@@ -134,8 +179,8 @@ _ID_SPLIT_RE = re.compile(r"[,;，；、\s]+")
 
 #: 每个渠道在 schema 里的私有选项，会被打包进 ``ProviderConfig.options``。
 _PROVIDER_OPTION_KEYS: dict[str, tuple[str, ...]] = {
-    "gpt": ("size",),
-    "gemini": ("response_modalities", "send_aspect_ratio", "ratio"),
+    "gpt": (),
+    "gemini": ("response_modalities",),
     "comfyui": (
         "workflows",
         "default_workflow",
@@ -143,16 +188,13 @@ _PROVIDER_OPTION_KEYS: dict[str, tuple[str, ...]] = {
         "max_wait",
         "client_id",
     ),
-    "seedream": ("size", "watermark", "optimize_prompt"),
-    "grok": ("size", "edit_model", "size_mode", "edit_mode"),
+    "seedream": ("watermark", "optimize_prompt"),
+    "grok": ("edit_model", "size_mode", "edit_mode"),
     "jimeng": (
-        "ratio",
-        "resolution",
-        "intelligent_ratio",
         "sample_strength",
         "reference_mode",
     ),
-    "qwen": ("size", "watermark", "prompt_extend", "poll_interval", "max_wait"),
+    "qwen": ("watermark", "prompt_extend", "poll_interval", "max_wait"),
 }
 
 #: 渠道状态常量。刻意区分"没配"和"配坏了"：
@@ -434,10 +476,196 @@ class MultiImagePlugin(Star):
         self._data_directory: Path | None = None
         self._cache_dir: Path | None = None
         self._temporary_files: set[Path] = set()
+        self._connection_test_task: asyncio.Task[None] | None = None
+        self._connection_result_save_task: asyncio.Task[None] | None = None
+        self._model_refresh_task: asyncio.Task[None] | None = None
+        self._model_options = ModelOptions(
+            self.config, lambda name: self._build_provider_config(name, DrawArguments())
+        )
 
         #: 群号 -> 渠道写法（如 ``comfyui@anime``）。``None`` 表示尚未从磁盘读取，
         #: 首次用到时才加载，避免插件加载阶段做磁盘 IO。
         self._group_channels: dict[str, str] | None = None
+
+    async def initialize(self) -> None:
+        """Start optional read-only checks without blocking plugin initialization."""
+        migrated = migrate_configuration(self.config)
+        migrated = migrate_size_settings(self.config) or migrated
+        if migrated:
+            try:
+                async_save = getattr(self.config, "save_config_async", None)
+                sync_save = getattr(self.config, "save_config", None)
+                if callable(async_save):
+                    await async_save()
+                elif callable(sync_save):
+                    sync_save()
+            except Exception:  # noqa: BLE001  # Never log configuration values.
+                logger.warning(
+                    "[multi_image] 旧配置已在内存中迁移，保存失败，请重新保存插件配置。"
+                )
+        prepare_size_schema(self.config)
+        if any(
+            task and not task.done()
+            for task in (self._connection_test_task, self._model_refresh_task)
+        ):
+            return
+        names = self._model_options.prepare()
+        if not self._global("test_connection_on_save", False):
+            if names:
+                self._model_refresh_task = asyncio.create_task(
+                    self._refresh_model_options(names)
+                )
+            return
+        if self._connection_test_task and not self._connection_test_task.done():
+            return
+        self._connection_test_task = asyncio.create_task(self._test_connections())
+
+    async def _refresh_model_options(self, names: list[str]) -> None:
+        """Refresh native selects even when connection result recording is off."""
+        semaphore = asyncio.Semaphore(3)
+
+        async def read(name: str) -> None:
+            async with semaphore:
+                try:
+                    await self._model_options.read(name)
+                except Exception:  # noqa: BLE001  # Do not expose upstream responses.
+                    self._model_options.failed(name)
+                    logger.warning(
+                        f"[multi_image] {name} 模型目录读取失败，保留手动填写。"
+                    )
+
+        await asyncio.gather(*(read(name) for name in names))
+
+    async def _test_connections(self) -> None:
+        """Bound concurrency and report only fixed, sanitized diagnostics."""
+        signature = self._connection_config_signature()
+        semaphore = asyncio.Semaphore(3)
+        logger.info("[multi_image] 开始连通性测试：仅只读请求，不生成图片。")
+
+        async def check(name: str) -> ConnectionResult:
+            async with semaphore:
+                try:
+                    if self._model_options.enabled(name):
+                        result = await self._model_options.read(name)
+                    else:
+                        config = self._build_provider_config(name, DrawArguments())
+                        result = await test_connection(config)
+                except Exception:  # noqa: BLE001  # Never log raw upstream or configuration data.
+                    self._model_options.failed(name)
+                    result = ConnectionResult("error", "测试异常，请检查渠道配置")
+                labels = {
+                    "ok": "连接通过",
+                    "warning": "待确认",
+                    "error": "测试失败",
+                    "skip": "已跳过",
+                }
+                log = (
+                    logger.warning
+                    if result.state in {"warning", "error"}
+                    else logger.info
+                )
+                log(
+                    f"[multi_image] 连通性测试 渠道={name} 状态={labels[result.state]} "
+                    f"延迟={result.elapsed_ms} ms "
+                    f"HTTP={result.status_code if result.status_code is not None else '—'} "
+                    f"{result.detail}"
+                )
+                return result
+
+        names = supported_providers()
+        results = await asyncio.gather(*(check(name) for name in names))
+        if signature == self._connection_config_signature():
+            await self._save_connection_results(
+                dict(zip(names, results, strict=True)), signature
+            )
+        else:
+            logger.info(
+                "[multi_image] 测试期间配置已变化，本轮结果不覆盖配置中的旧记录。"
+            )
+        logger.info(
+            "[multi_image] 连通性测试完成：延迟为只读请求耗时，不代表生图耗时或权限。"
+        )
+
+    def _connection_config_signature(self) -> bytes:
+        """Detect changes without persisting or exposing credential-bearing data."""
+        settings = {
+            key: value
+            for key, value in self.config.items()
+            if key not in _CONNECTION_RESULT_KEYS
+        }
+        return hashlib.sha256(
+            json.dumps(settings, sort_keys=True, ensure_ascii=False).encode("utf-8")
+        ).digest()
+
+    async def _save_connection_results(
+        self, results: dict[str, ConnectionResult], signature: bytes | None = None
+    ) -> None:
+        """Persist only the two display fields via AstrBot's configuration API."""
+        async_save = getattr(self.config, "save_config_async", None)
+        sync_save = getattr(self.config, "save_config", None)
+        if not callable(async_save) and not callable(sync_save):
+            logger.warning("[multi_image] 配置保存接口不可用，连通性结果仅记录到日志。")
+            return
+        counts = {
+            state: sum(result.state == state for result in results.values())
+            for state in ("ok", "warning", "error", "skip")
+        }
+        lines = [
+            (
+                f"通过 {counts['ok']} 个 · 待确认 {counts['warning']} 个 · "
+                f"失败 {counts['error']} 个 · 跳过 {counts['skip']} 个"
+            ),
+            "",
+        ]
+        labels = {
+            "ok": "✓ 连接通过",
+            "warning": "? 待确认",
+            "error": "× 测试失败",
+            "skip": "— 已跳过",
+        }
+        for name, result in results.items():
+            status = result.status_code if result.status_code is not None else "—"
+            lines.append(
+                f"{name}: {labels[result.state]} · {result.elapsed_ms} ms · HTTP {status}"
+            )
+            if result.state != "ok":
+                lines.append(f"  {result.detail}")
+        updates = {
+            "connection_test_time": datetime.now()
+            .astimezone()
+            .strftime("%Y-%m-%d %H:%M:%S %z · 已完成"),
+            "connection_test_result": "\n".join(lines),
+        }
+
+        async def save() -> None:
+            if (
+                signature is not None
+                and signature != self._connection_config_signature()
+            ):
+                logger.info("[multi_image] 配置已变化，本轮测试结果不再写入。")
+                return
+            absent = object()
+            previous = {key: self.config.get(key, absent) for key in updates}
+            try:
+                if callable(async_save):
+                    committed = await async_save(updates)
+                else:
+                    committed = await asyncio.to_thread(sync_save, updates)
+                if committed is False:
+                    logger.info("[multi_image] 更新的配置已取代本轮测试结果保存。")
+            except Exception:  # noqa: BLE001  # Keep generation usable after a disk error.
+                for key, value in updates.items():
+                    if self.config.get(key) == value:
+                        if previous[key] is absent:
+                            self.config.pop(key, None)
+                        else:
+                            self.config[key] = previous[key]
+                logger.warning(
+                    "[multi_image] 无法保存连通性测试结果，请检查配置目录权限。"
+                )
+
+        self._connection_result_save_task = asyncio.create_task(save())
+        await asyncio.shield(self._connection_result_save_task)
 
     # ------------------------------------------------------------------ #
     # 指令
@@ -470,9 +698,14 @@ class MultiImagePlugin(Star):
             return
 
         arguments.workflow = workflow
+        try:
+            arguments = self._apply_parameter_preset(provider_name, arguments)
+        except ValueError as exc:
+            yield event.plain_result(str(exc))
+            return
 
         # 频率限制排在并发占位之前：被限流时不该占用会话位。
-        wait_seconds = self._rate_limit_retry_after(event)
+        wait_seconds = self._rate_limit_retry_after(event, record=False)
         if wait_seconds > 0:
             logger.info(
                 "[multi_image] 触发频率限制：群=%s 用户=%s 需等待 %.0fs",
@@ -489,6 +722,9 @@ class MultiImagePlugin(Star):
             return
 
         try:
+            # No await occurs between checking quota and accepting the session slot.
+            # Busy requests must not consume a generation attempt.
+            self._rate_limit_retry_after(event)
             self._cleanup_cache()
             references = await self._collect_references(event, provider_name)
             request = self._build_request(arguments, references)
@@ -505,7 +741,9 @@ class MultiImagePlugin(Star):
                 return
 
             for image in images:
-                yield event.image_result(await self._resolve_source(provider_name, image))
+                yield event.image_result(
+                    await self._resolve_source(provider_name, image)
+                )
         except ProviderNotConfiguredError as exc:
             yield event.plain_result(f"渠道未配置完整：{exc}")
         except UnsupportedFeatureError as exc:
@@ -535,7 +773,9 @@ class MultiImagePlugin(Star):
         * **配置不完整** —— 填了 Key 但还缺东西，需要用户处理。
         """
         lines = [f"多模型生图 v{PLUGIN_VERSION} · 渠道状态", ""]
-        default_provider = normalize_provider_name(str(self._global("default_provider", "") or ""))
+        default_provider = normalize_provider_name(
+            str(self._global("default_provider", "") or "")
+        )
 
         # 本群设定的渠道优先于全局默认，先把"实际会用哪个"说清楚，
         # 否则用户在群里看到的 [默认] 标记和他发出去的结果对不上。
@@ -602,7 +842,8 @@ class MultiImagePlugin(Star):
         if ready and unconfigured:
             lines.append("")
             lines.append(
-                f"⬜ 未配置（{len(unconfigured)}）· 不影响使用：" + "、".join(unconfigured)
+                f"⬜ 未配置（{len(unconfigured)}）· 不影响使用："
+                + "、".join(unconfigured)
             )
 
         workflows = self._comfyui_workflows()
@@ -668,14 +909,17 @@ class MultiImagePlugin(Star):
         if reset_requested:
             if not self._group_channel(event):
                 yield event.plain_result(
-                    "本群本来就没有单独设置渠道，无需恢复。\n\n" + self._switch_status(event)
+                    "本群本来就没有单独设置渠道，无需恢复。\n\n"
+                    + self._switch_status(event)
                 )
                 return
             if not self._set_group_channel(event, ""):
                 yield event.plain_result(_SWITCH_SAVE_FAILED)
                 return
 
-            fallback = normalize_provider_name(str(self._global("default_provider", "") or ""))
+            fallback = normalize_provider_name(
+                str(self._global("default_provider", "") or "")
+            )
             tail = (
                 f"现在跟随全局默认渠道：{fallback}"
                 if fallback
@@ -686,7 +930,9 @@ class MultiImagePlugin(Star):
 
         if not value:
             yield event.plain_result(
-                (first_problem or "没看懂要切到哪个渠道。") + "\n\n" + self._switch_status(event)
+                (first_problem or "没看懂要切到哪个渠道。")
+                + "\n\n"
+                + self._switch_status(event)
             )
             return
 
@@ -708,7 +954,9 @@ class MultiImagePlugin(Star):
     def _switch_status(self, event: AstrMessageEvent) -> str:
         """拼出"本群当前渠道 + 可切换的渠道"这段说明。"""
         current = self._group_channel(event)
-        default_provider = normalize_provider_name(str(self._global("default_provider", "") or ""))
+        default_provider = normalize_provider_name(
+            str(self._global("default_provider", "") or "")
+        )
 
         lines: list[str] = []
         if current:
@@ -717,10 +965,14 @@ class MultiImagePlugin(Star):
             # 不提示的话群里只会看到"生图失败"，不知道是设置过期了。
             stale_name = normalize_provider_name(split_provider_token(current)[0])
             if stale_name:
-                state, problems = self._channel_state(stale_name, self._section(stale_name))
+                state, problems = self._channel_state(
+                    stale_name, self._section(stale_name)
+                )
                 if state != _STATE_READY:
                     detail = "；".join(problems) if problems else "未配置"
-                    lines.append(f"⚠️ 但它现在不可用（{detail}），/draw 会失败，建议换一个渠道。")
+                    lines.append(
+                        f"⚠️ 但它现在不可用（{detail}），/draw 会失败，建议换一个渠道。"
+                    )
         elif default_provider:
             lines.append(f"本群未单独设置，当前跟随全局默认渠道：{default_provider}")
         else:
@@ -772,7 +1024,10 @@ class MultiImagePlugin(Star):
             aliases = self._comfyui_workflows()
             if workflow not in aliases:
                 available = "、".join(aliases) if aliases else "还没有配置任何工作流"
-                return "", f"comfyui 没有名为「{workflow}」的工作流。可用的工作流：{available}"
+                return (
+                    "",
+                    f"comfyui 没有名为「{workflow}」的工作流。可用的工作流：{available}",
+                )
 
         value = f"{name}@{workflow}" if workflow else name
         state, problems = self._channel_state(name, self._section(name))
@@ -781,7 +1036,9 @@ class MultiImagePlugin(Star):
             return "", f"渠道 {value} 当前不可用（{detail}），换好之后才能切过去。"
         return value, ""
 
-    def _channel_state(self, name: str, section: dict[str, Any]) -> tuple[str, list[str]]:
+    def _channel_state(
+        self, name: str, section: dict[str, Any]
+    ) -> tuple[str, list[str]]:
         """判断单个渠道的状态。
 
         ``缺少 API Key`` / ``缺少工作流模板`` 视为**未配置**（正常状态，不是错误）；
@@ -828,7 +1085,9 @@ class MultiImagePlugin(Star):
                 return group_provider, arguments.workflow or tail
             # 设置里的渠道名已经不被支持（例如插件降级）时不能就此罢工，
             # 记一笔日志后退回全局默认，用户仍能正常生图。
-            logger.warning("[multi_image] 群设置里的渠道 %r 无法识别，已忽略", group_token)
+            logger.warning(
+                "[multi_image] 群设置里的渠道 %r 无法识别，已忽略", group_token
+            )
 
         return normalize_provider_name(
             str(self._global("default_provider", "") or "")
@@ -882,13 +1141,13 @@ class MultiImagePlugin(Star):
 
         文件损坏、被手工改坏都**不能**影响插件启动，所以这里只记日志。
         """
-        path = self._data_directory_path() / _GROUP_SETTINGS_FILENAME
         try:
+            path = self._data_directory_path() / _GROUP_SETTINGS_FILENAME
             raw = json.loads(path.read_text(encoding="utf-8-sig"))
         except FileNotFoundError:
             return {}
         except (OSError, ValueError) as exc:
-            logger.warning("[multi_image] 群渠道设置读取失败，将按未设置处理：%s（%s）", path, exc)
+            logger.warning("[multi_image] 群渠道设置读取失败，将按未设置处理：%s", exc)
             return {}
 
         if not isinstance(raw, dict):
@@ -905,12 +1164,10 @@ class MultiImagePlugin(Star):
 
     def _store_group_channels(self, mapping: dict[str, str]) -> bool:
         """原子写入群渠道设置（先写临时文件再替换，避免半个文件）。"""
-        path = self._data_directory_path() / _GROUP_SETTINGS_FILENAME
-        temporary = path.with_name(path.name + ".tmp")
         try:
-            # 目录通常已由 _data_directory_path 建好，但写入方自己保证这件事更稳：
-            # 否则在"数据目录建不出来"的降级路径上，这里只会得到一句
-            # 让人摸不着头脑的 No such file or directory。
+            path = self._data_directory_path() / _GROUP_SETTINGS_FILENAME
+            temporary = path.with_name(path.name + ".tmp")
+            # 数据目录可能在初始化后被移除，写入前再次确保目录存在。
             temporary.parent.mkdir(parents=True, exist_ok=True)
             temporary.write_text(
                 json.dumps(mapping, ensure_ascii=False, indent=2, sort_keys=True),
@@ -918,7 +1175,7 @@ class MultiImagePlugin(Star):
             )
             temporary.replace(path)
         except OSError as exc:
-            logger.warning("[multi_image] 群渠道设置写入失败：%s（%s）", path, exc)
+            logger.warning("[multi_image] 群渠道设置写入失败：%s", exc)
             return False
         return True
 
@@ -953,18 +1210,13 @@ class MultiImagePlugin(Star):
 
         if provider_name == "comfyui" and arguments.workflow:
             options["workflow_alias"] = arguments.workflow
-        if arguments.ratio:
-            options["ratio"] = arguments.ratio
-        if arguments.resolution:
-            options["resolution"] = arguments.resolution
-        if arguments.size:
-            options["size"] = arguments.size
+        apply_size_options(provider_name, section, arguments, options)
 
         timeout = section.get("timeout")
         try:
             timeout_value = float(timeout)
         except (TypeError, ValueError):
-            timeout_value = float(self._global("timeout", 180) or 180)
+            timeout_value = 180.0
 
         return ProviderConfig(
             name=provider_name,
@@ -1016,12 +1268,48 @@ class MultiImagePlugin(Star):
         """读取 ComfyUI 配置里已定义的模板别名。"""
         return [
             template.alias
-            for template in parse_workflow_templates(self._section("comfyui").get("workflows"))
+            for template in parse_workflow_templates(
+                self._section("comfyui").get("workflows")
+            )
         ]
 
     # ------------------------------------------------------------------ #
     # 请求构造
     # ------------------------------------------------------------------ #
+    def _apply_parameter_preset(
+        self, provider_name: str, arguments: DrawArguments
+    ) -> DrawArguments:
+        """Use channel presets unless this command explicitly supplies a layout."""
+        section = self._section(provider_name)
+        preset_id = str(section.get("parameter_preset") or "")
+        if arguments.width or arguments.height:
+            preset = resolve_manual_size(
+                provider_name, arguments.width, arguments.height
+            )
+        elif arguments.size or arguments.ratio:
+            return arguments
+        elif preset_id == "native":
+            validate_native_size(provider_name, section)
+            return arguments
+        elif preset_id == "custom":
+            preset = resolve_manual_size(
+                provider_name, *parse_manual_dimensions(section.get("dimensions"))
+            )
+        else:
+            preset = resolve_preset(
+                provider_name, preset_id, str(section.get("model") or "")
+            )
+        if preset is None:
+            return arguments
+        changes = {"width": preset.width, "height": preset.height, "size": preset.size}
+        if not (arguments.width or arguments.height) and preset_id != "custom":
+            changes["count"] = arguments.count or preset.count
+        if provider_name in {"gemini", "jimeng"} and not arguments.ratio:
+            changes["ratio"] = preset.ratio
+        if preset.resolution and not arguments.resolution:
+            changes["resolution"] = preset.resolution
+        return replace(arguments, **changes)
+
     def _build_request(
         self,
         arguments: DrawArguments,
@@ -1030,19 +1318,17 @@ class MultiImagePlugin(Star):
         """把指令参数与参考图组装成统一的生图请求。
 
         尺寸的优先级：``--width``/``--height`` > ``--size``（像素写法会同时
-        写入宽高）> 全局默认宽高。``size`` 字段始终保留原样，
+        写入宽高）> 渠道预设或手动尺寸 > 1024 回退值。``size`` 字段始终保留原样，
         因为像 Seedream 的 ``2K``、即梦的 ``16:9`` 这类写法需要原样透传。
         """
-        count = arguments.count or int(self._global("default_count", 1) or 1)
+        count = arguments.count or 1
         max_count = max(1, int(self._global("max_count", 4) or 4))
-        default_width = int(self._global("default_width", 1024) or 1024)
-        default_height = int(self._global("default_height", 1024) or 1024)
 
         return ImageGenerationRequest(
             prompt=arguments.prompt,
             negative_prompt=arguments.negative,
-            width=arguments.width or default_width,
-            height=arguments.height or default_height,
+            width=arguments.width or 1024,
+            height=arguments.height or 1024,
             count=max(1, min(count, max_count)),
             seed=arguments.seed,
             size=arguments.size,
@@ -1100,10 +1386,7 @@ class MultiImagePlugin(Star):
         借助 AstrBot 的 ``Image.convert_to_base64``，无论用户发的是网络图片
         还是本地文件，这里都能拿到字节内容。
         """
-        if not bool(self._global("enable_reference", True)):
-            return []
-
-        limit = max(0, int(self._global("max_references", 3) or 3))
+        limit = max(0, int(self._global("max_references", 3)))
         if limit == 0:
             return []
 
@@ -1128,7 +1411,9 @@ class MultiImagePlugin(Star):
             if not raw:
                 continue
             if len(raw) > max_bytes:
-                logger.warning("[multi_image] 参考图超过 %dMB，已跳过", max_bytes // (1024 * 1024))
+                logger.warning(
+                    "[multi_image] 参考图超过 %dMB，已跳过", max_bytes // (1024 * 1024)
+                )
                 continue
 
             mime = sniff_mime(raw)
@@ -1189,9 +1474,7 @@ class MultiImagePlugin(Star):
         否则落盘成临时文件再发送，这样需要鉴权才能下载的图片也能发出去。
         """
         section = self._section(provider_name)
-        force_download = bool(self._global("force_download", False)) or bool(
-            section.get("force_download", False)
-        )
+        force_download = bool(section.get("force_download", False))
 
         if image.url and not force_download:
             return image.url
@@ -1207,15 +1490,20 @@ class MultiImagePlugin(Star):
                         provider_label=provider_name,
                         headers=headers,
                     )
-                except ImageGenerationError:
+                except HttpRequestFailed as exc:
                     # 有的图床对"带了鉴权头的外来请求"直接回 401，
                     # 去掉头反而是公开可下的，所以再裸试一次。
-                    if "Authorization" not in headers:
+                    credential_names = {"authorization", "x-api-key", "x-goog-api-key"}
+                    if exc.status_code not in (401, 403) or not any(
+                        key.lower() in credential_names for key in headers
+                    ):
                         raise
-                    fallback = {k: v for k, v in headers.items() if k != "Authorization"}
-                    logger.debug(
-                        "[multi_image] 带鉴权头下载失败，去掉后用裸请求重试：%s", image.url
-                    )
+                    fallback = {
+                        k: v
+                        for k, v in headers.items()
+                        if k.lower() not in credential_names
+                    }
+                    logger.debug("[multi_image] 图片下载鉴权失败，去掉凭证头重试")
                     image = await download_image(
                         client,
                         image.url,
@@ -1233,11 +1521,7 @@ class MultiImagePlugin(Star):
         （对象存储/CDN）上，把密钥发过去会被判成鉴权失败直接 401——
         实测 agnes 图床就是如此（带头 401、不带头 200）。
         """
-        headers: dict[str, str] = {}
-        if config.api_key and _same_host(image_url, config.api_base):
-            headers["Authorization"] = f"Bearer {config.api_key}"
-        headers.update(config.extra_headers)
-        return headers
+        return auth_headers(config) if _same_host(image_url, config.api_base) else {}
 
     def _write_cache(self, image: GeneratedImage) -> str:
         """把 Base64 图片写入缓存目录并返回绝对路径。"""
@@ -1254,49 +1538,44 @@ class MultiImagePlugin(Star):
     def _data_directory_path(self) -> Path:
         """返回（并按需创建）插件数据目录。
 
-        群渠道设置与图片缓存都放在这里。取不到、建不了都**不能抛异常**：
-
-        * ``/draw`` 每次都会读一次群设置，这里抛异常就等于"读设置失败 → 生图失败"，
-          而这个失败与用户的操作毫无关系，非常难查；
-        * 所以按 ``StarTools`` 数据目录 → 系统临时目录的顺序退让，
-          两边都建不出来时也返回路径本身——后续读写各自会失败并被就地处理。
-
-        @author DeepSeek Harness
+        StarTools 不可用时仍通过框架路径工具定位 data/plugin_data，遵循
+        ASTRBOT_ROOT 与桌面运行环境。创建失败交给调用方处理，不切换至临时目录，
+        也不缓存失败路径，以便权限恢复后重试。
         """
         if self._data_directory is not None:
             return self._data_directory
 
-        import tempfile
-
-        candidates: list[Path] = []
-        # 只是"取不到数据目录"，不是错误：退回临时目录即可
-        with contextlib.suppress(Exception):
-            candidates.append(Path(StarTools.get_data_dir(PLUGIN_NAME)))
-        candidates.append(Path(tempfile.gettempdir()) / PLUGIN_NAME)
-
-        for base in candidates:
+        try:
+            base = Path(StarTools.get_data_dir(PLUGIN_NAME))
+        except (AttributeError, OSError, RuntimeError, TypeError, ValueError) as exc:
+            logger.warning(
+                "[multi_image] 框架插件数据目录接口不可用，尝试标准数据路径：%s", exc
+            )
             try:
-                base.mkdir(parents=True, exist_ok=True)
-            except OSError as exc:
-                logger.warning("[multi_image] 数据目录不可用：%s（%s）", base, exc)
-                continue
-            self._data_directory = base
-            return self._data_directory
-
-        self._data_directory = candidates[-1]
+                base = Path(get_astrbot_data_path()) / "plugin_data" / PLUGIN_NAME
+            except Exception as exc:
+                raise OSError("无法定位 AstrBot 插件数据目录") from exc
+        base.mkdir(parents=True, exist_ok=True)
+        self._data_directory = base
         return self._data_directory
 
     def _ensure_cache_dir(self) -> Path:
         """返回（并按需创建）插件缓存目录。"""
         if self._cache_dir is None:
-            directory = self._data_directory_path() / "cache"
-            directory.mkdir(parents=True, exist_ok=True)
+            try:
+                directory = self._data_directory_path() / "cache"
+                directory.mkdir(parents=True, exist_ok=True)
+            except OSError as exc:
+                logger.warning("[multi_image] 图片缓存目录不可用：%s", exc)
+                raise ImageGenerationError(
+                    "无法使用插件图片缓存目录，请检查 AstrBot 数据目录及权限。"
+                ) from exc
             self._cache_dir = directory
         return self._cache_dir
 
     def _cleanup_cache(self) -> None:
         """清理超过保留时长的历史图片，避免缓存目录无限增长。"""
-        keep_minutes = int(self._global("cache_keep_minutes", 30) or 30)
+        keep_minutes = int(self._global("cache_keep_minutes", 30))
         if keep_minutes <= 0:
             return
 
@@ -1421,11 +1700,13 @@ class MultiImagePlugin(Star):
     #: 越急的人越用不了，行为也不可预测。过期条目会在每次检查时顺带清理。
     _rate_history: ClassVar[dict[str, list[float]]] = {}
 
-    def _rate_limit_retry_after(self, event: AstrMessageEvent) -> float:
+    def _rate_limit_retry_after(
+        self, event: AstrMessageEvent, *, record: bool = True
+    ) -> float:
         """检查频率限制。
 
         Returns:
-            需要等待的秒数；``0`` 表示放行（并已计入本次调用）。
+            需要等待的秒数；``0`` 表示放行，``record=False`` 时只检查、不计数。
 
         @author DeepSeek Harness
         """
@@ -1448,8 +1729,9 @@ class MultiImagePlugin(Star):
             # 最早那次调用滑出窗口后就能再用
             return max(0.0, window - (now - history[0]))
 
-        history.append(now)
-        self._rate_history[key] = history
+        if record:
+            history.append(now)
+            self._rate_history[key] = history
         return 0
 
     def _rate_window_minutes(self) -> int:
@@ -1557,6 +1839,16 @@ class MultiImagePlugin(Star):
     # ------------------------------------------------------------------ #
     async def terminate(self) -> None:
         """插件卸载 / 重载时清理临时图片与会话占位。"""
+        if self._model_refresh_task is not None:
+            self._model_refresh_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await self._model_refresh_task
+        if self._connection_test_task is not None:
+            self._connection_test_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await self._connection_test_task
+        if self._connection_result_save_task is not None:
+            await self._connection_result_save_task
         for path in tuple(self._temporary_files):
             try:
                 path.unlink(missing_ok=True)
@@ -1590,11 +1882,25 @@ def _same_host(first: str, second: str) -> bool:
     """
     try:
         left, right = urlparse(first), urlparse(second)
+        origins = [
+            (
+                parsed.scheme.lower(),
+                (parsed.hostname or "").lower(),
+                parsed.port or (443 if parsed.scheme.lower() == "https" else 80),
+            )
+            for parsed in (left, right)
+        ]
     except ValueError:
         return False
-    if not left.netloc or not right.netloc:
+    if (
+        not left.hostname
+        or not right.hostname
+        or any(
+            parsed.scheme.lower() not in {"http", "https"}
+            or parsed.username is not None
+            or parsed.password is not None
+            for parsed in (left, right)
+        )
+    ):
         return False
-    return (left.scheme.lower(), left.netloc.lower()) == (
-        right.scheme.lower(),
-        right.netloc.lower(),
-    )
+    return origins[0] == origins[1]

@@ -98,6 +98,14 @@ class GrokProvider(OpenAICompatibleProvider):
             return payload
 
         payload.pop("size", None)
+        if self.config.option("native_size_mode"):
+            ratio = str(self.config.option("ratio", "") or "")
+            resolution = str(self.config.option("resolution", "") or "")
+            if ratio:
+                payload["aspect_ratio"] = ratio
+            if resolution:
+                payload["resolution"] = resolution
+            return payload
         payload["aspect_ratio"] = self._aspect_ratio(request)
         payload["resolution"] = self._resolution(request)
         return payload
@@ -143,6 +151,12 @@ class GrokProvider(OpenAICompatibleProvider):
             raise ImageGenerationError(f"{self.label} 图生图接口需要参考图")
 
         mode = str(self.config.option("edit_mode", "auto") or "auto").strip().lower()
+        if self.config.option("native_size_mode"):
+            if mode == "multipart":
+                raise ImageGenerationError(
+                    "Grok 原生档位需要 JSON 图生图格式，请修改图生图请求格式。"
+                )
+            mode = "json"
         if mode == "multipart":
             return await super()._generate_via_edits(request, client, base, model)
 
@@ -152,7 +166,9 @@ class GrokProvider(OpenAICompatibleProvider):
         for style in order:
             try:
                 if style == "multipart":
-                    return await super()._generate_via_edits(request, client, base, model)
+                    return await super()._generate_via_edits(
+                        request, client, base, model
+                    )
                 return await self._generate_edits_json(request, client, base, model)
             except HttpRequestFailed as exc:
                 failures.append(f"{style}: {exc}")
@@ -190,6 +206,6 @@ class GrokProvider(OpenAICompatibleProvider):
         if self.include_response_format:
             payload.setdefault("response_format", "url")
 
-        payload = self.apply_size_fields(payload, request)
+        payload = self.config.merged_body(self.apply_size_fields(payload, request))
         data = await self._post_json(client, url, payload, action="图生图")
         return self._collect(data, base)

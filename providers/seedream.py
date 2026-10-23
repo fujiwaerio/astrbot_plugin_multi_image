@@ -37,7 +37,9 @@ class SeedreamProvider(OpenAICompatibleProvider):
     default_model = "doubao-seedream-4-0-250828"
 
     #: SeedEdit 系列是图像编辑模型，必须带参考图；这里给出该改用什么。
-    text_to_image_hint = "doubao-seedream-4-0-250828 这类 Seedream 模型（而不是 SeedEdit）"
+    text_to_image_hint = (
+        "doubao-seedream-4-0-250828 这类 Seedream 模型（而不是 SeedEdit）"
+    )
 
     api_version = "api/v3"
     generation_path = "/images/generations"
@@ -80,6 +82,8 @@ class SeedreamProvider(OpenAICompatibleProvider):
         if request.has_references:
             # 方舟接受 URL 或 data URI；本插件统一用 data URI，
             # 这样用户从 QQ 直接发的图也能当参考图。
-            payload["image"] = [reference.to_data_uri() for reference in request.references]
+            payload["image"] = [
+                reference.to_data_uri() for reference in request.references
+            ]
 
         return self.config.merged_body(payload)

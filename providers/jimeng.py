@@ -98,15 +98,12 @@ class JimengProvider(OpenAICompatibleProvider):
         payload: dict[str, Any] = {
             "model": model,
             "prompt": request.prompt,
-            "ratio": self.resolve_ratio(request),
             "resolution": self.resolve_resolution(request),
         }
         if request.negative_prompt:
             payload["negative_prompt"] = request.negative_prompt
 
-        intelligent_ratio = self.config.option("intelligent_ratio")
-        if intelligent_ratio is not None:
-            payload["intelligent_ratio"] = bool(intelligent_ratio)
+        self._apply_ratio(payload, request)
 
         if self.include_response_format:
             payload.setdefault("response_format", "url")
@@ -116,6 +113,19 @@ class JimengProvider(OpenAICompatibleProvider):
     # ------------------------------------------------------------------ #
     # 尺寸换算
     # ------------------------------------------------------------------ #
+    def _apply_ratio(
+        self, payload: dict[str, Any], request: ImageGenerationRequest
+    ) -> None:
+        """Send automatic or fixed ratio without a competing ratio field."""
+        intelligent = bool(self.config.option("intelligent_ratio", False))
+        payload["intelligent_ratio"] = intelligent
+        if not intelligent:
+            if self.config.option("native_size_mode") and not self.config.option(
+                "ratio"
+            ):
+                return
+            payload["ratio"] = self.resolve_ratio(request)
+
     def resolve_ratio(self, request: ImageGenerationRequest) -> str:
         """返回画面比例；用户显式配置 ``ratio`` 时以配置为准。"""
         configured = str(self.config.option("ratio", "") or "").strip()
@@ -160,7 +170,6 @@ class JimengProvider(OpenAICompatibleProvider):
             "model": model,
             "prompt": request.prompt,
             "images": [self._reference_payload(item) for item in request.references],
-            "ratio": self.resolve_ratio(request),
             "resolution": self.resolve_resolution(request),
         }
         if request.negative_prompt:
@@ -172,9 +181,7 @@ class JimengProvider(OpenAICompatibleProvider):
             with contextlib.suppress(TypeError, ValueError):
                 payload["sample_strength"] = float(strength)
 
-        intelligent_ratio = self.config.option("intelligent_ratio")
-        if intelligent_ratio is not None:
-            payload["intelligent_ratio"] = bool(intelligent_ratio)
+        self._apply_ratio(payload, request)
 
         if self.include_response_format:
             payload.setdefault("response_format", "url")
@@ -200,7 +207,9 @@ class JimengProvider(OpenAICompatibleProvider):
         """
         if reference.url:
             return reference.url
-        mode = str(self.config.option("reference_mode", "data_uri") or "").strip().lower()
+        mode = (
+            str(self.config.option("reference_mode", "data_uri") or "").strip().lower()
+        )
         if mode in ("base64", "b64", "raw"):
             return reference.to_base64()
         return reference.to_data_uri()

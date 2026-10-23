@@ -31,7 +31,13 @@ from .base import (
     ImageGenerationRequest,
     ImageProvider,
 )
-from .http import HttpRequestFailed, auth_headers, extract_images, resolve_endpoint, send_request
+from .http import (
+    HttpRequestFailed,
+    auth_headers,
+    extract_images,
+    resolve_endpoint,
+    send_request,
+)
 
 __all__ = ["DashScopeProvider", "clean_dashscope_base"]
 
@@ -267,7 +273,9 @@ class DashScopeProvider(ImageProvider):
         if task_id:
             return await self._poll(client, base, task_id)
 
-        raise ImageGenerationError(f"{self.label} 未返回图片：{self._describe(payload)}")
+        raise ImageGenerationError(
+            f"{self.label} 未返回图片：{self._describe(payload)}"
+        )
 
     @staticmethod
     def _decode(response: httpx.Response, base: str) -> Any:
@@ -308,7 +316,9 @@ class DashScopeProvider(ImageProvider):
     ) -> list[GeneratedImage]:
         """轮询异步任务直到出图或超时。"""
         interval = max(0.5, float(self.config.option("poll_interval", 2.0)))
-        deadline = time.monotonic() + max(10.0, float(self.config.option("max_wait", 180.0)))
+        deadline = time.monotonic() + max(
+            10.0, float(self.config.option("max_wait", 180.0))
+        )
         url = f"{base}{_TASK_PATH.format(task_id=task_id)}"
 
         while True:

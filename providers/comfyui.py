@@ -49,7 +49,11 @@ __all__ = ["ComfyUIProvider", "WorkflowTemplate", "parse_workflow_templates"]
 
 
 #: 正向提示词节点类型（按优先级）。
-_POSITIVE_NODE_TYPES = ("CLIPTextEncode", "CLIPTextEncodeSDXL", "BNK_CLIPTextEncodeAdvanced")
+_POSITIVE_NODE_TYPES = (
+    "CLIPTextEncode",
+    "CLIPTextEncodeSDXL",
+    "BNK_CLIPTextEncodeAdvanced",
+)
 
 #: 尺寸节点类型。
 _LATENT_NODE_TYPES = (
@@ -60,7 +64,12 @@ _LATENT_NODE_TYPES = (
 )
 
 #: 采样器节点类型，用于注入随机种子。
-_SAMPLER_NODE_TYPES = ("KSampler", "KSamplerAdvanced", "SamplerCustom", "KSampler (Efficient)")
+_SAMPLER_NODE_TYPES = (
+    "KSampler",
+    "KSamplerAdvanced",
+    "SamplerCustom",
+    "KSampler (Efficient)",
+)
 
 #: 参考图输入节点类型。
 _LOAD_IMAGE_NODE_TYPES = ("LoadImage", "LoadImageMask", "ImageLoad")
@@ -95,7 +104,9 @@ class WorkflowTemplate:
     @classmethod
     def from_config(cls, item: dict[str, Any], index: int) -> WorkflowTemplate:
         """从配置面板的一个模板条目构造。"""
-        alias = str(item.get("alias") or item.get("name") or f"workflow{index + 1}").strip()
+        alias = str(
+            item.get("alias") or item.get("name") or f"workflow{index + 1}"
+        ).strip()
         return cls(
             alias=alias,
             raw=str(item.get("workflow_json") or item.get("workflow") or ""),
@@ -117,11 +128,15 @@ class WorkflowTemplate:
             )
         file_path = Path(self.path).expanduser()
         if not file_path.is_file():
-            raise ImageGenerationError(f"ComfyUI 工作流「{self.alias}」的文件不存在：{self.path}")
+            raise ImageGenerationError(
+                f"ComfyUI 工作流「{self.alias}」的文件不存在：{self.path}"
+            )
         try:
             return file_path.read_text(encoding="utf-8")
         except OSError as exc:
-            raise ImageGenerationError(f"ComfyUI 工作流「{self.alias}」读取失败：{exc}") from exc
+            raise ImageGenerationError(
+                f"ComfyUI 工作流「{self.alias}」读取失败：{exc}"
+            ) from exc
 
 
 def parse_workflow_templates(raw: Any) -> list[WorkflowTemplate]:
@@ -195,7 +210,9 @@ class ComfyUIProvider(ImageProvider):
             if template.alias == wanted:
                 return template
         available = "、".join(template.alias for template in templates)
-        raise ImageGenerationError(f"ComfyUI 没有名为「{wanted}」的工作流模板，可用：{available}")
+        raise ImageGenerationError(
+            f"ComfyUI 没有名为「{wanted}」的工作流模板，可用：{available}"
+        )
 
     # ------------------------------------------------------------------ #
     # 主流程
@@ -243,7 +260,9 @@ class ComfyUIProvider(ImageProvider):
             ) from exc
 
         if not isinstance(workflow, dict) or not workflow:
-            raise ImageGenerationError(f"ComfyUI 工作流「{template.alias}」为空或结构不正确")
+            raise ImageGenerationError(
+                f"ComfyUI 工作流「{template.alias}」为空或结构不正确"
+            )
 
         if not uses_placeholders:
             self._inject_nodes(workflow, template, request, seed)
@@ -301,11 +320,15 @@ class ComfyUIProvider(ImageProvider):
         negative_id = template.negative_node or self._find_node(
             workflow, _POSITIVE_NODE_TYPES, index=1
         )
-        latent_id = template.latent_node or self._find_node(workflow, _LATENT_NODE_TYPES)
+        latent_id = template.latent_node or self._find_node(
+            workflow, _LATENT_NODE_TYPES
+        )
         seed_id = template.seed_node or self._find_node(workflow, _SAMPLER_NODE_TYPES)
 
         if positive_id:
-            self._set_input(workflow, positive_id, ("text", "prompt", "text_g"), request.prompt)
+            self._set_input(
+                workflow, positive_id, ("text", "prompt", "text_g"), request.prompt
+            )
         if negative_id and request.negative_prompt:
             self._set_input(
                 workflow,
@@ -388,7 +411,9 @@ class ComfyUIProvider(ImageProvider):
         uploaded_name: str,
     ) -> None:
         """把上传后的参考图文件名写进 LoadImage 节点。"""
-        node_id = template.image_node or self._find_node(workflow, _LOAD_IMAGE_NODE_TYPES)
+        node_id = template.image_node or self._find_node(
+            workflow, _LOAD_IMAGE_NODE_TYPES
+        )
         if not node_id:
             raise ImageGenerationError(
                 "ComfyUI 工作流里找不到图片输入节点（LoadImage），请在模板中填写「图片输入节点 id」"
@@ -425,7 +450,9 @@ class ComfyUIProvider(ImageProvider):
             try:
                 payload = response.json()
             except (ValueError, TypeError) as exc:
-                raise ImageGenerationError("ComfyUI 上传参考图返回的不是合法 JSON") from exc
+                raise ImageGenerationError(
+                    "ComfyUI 上传参考图返回的不是合法 JSON"
+                ) from exc
             name = str(payload.get("name") or "")
             subfolder = str(payload.get("subfolder") or "")
             if not name:
@@ -473,7 +500,9 @@ class ComfyUIProvider(ImageProvider):
     ) -> dict[str, Any]:
         """轮询 ``/history/{prompt_id}`` 直到任务完成或超时。"""
         interval = max(0.2, float(self.config.option("poll_interval", 1.0)))
-        deadline = time.monotonic() + max(1.0, float(self.config.option("max_wait", 300.0)))
+        deadline = time.monotonic() + max(
+            1.0, float(self.config.option("max_wait", 300.0))
+        )
         blank_polls = 0
 
         while True:
@@ -598,7 +627,11 @@ def _is_failed(status: Any) -> bool:
     if str(status.get("status_str") or "").lower() == "error":
         return True
     for message in status.get("messages") or []:
-        if isinstance(message, (list, tuple)) and message and message[0] == "execution_error":
+        if (
+            isinstance(message, (list, tuple))
+            and message
+            and message[0] == "execution_error"
+        ):
             return True
     return False
 
@@ -627,7 +660,11 @@ def _summarize_node_errors(node_errors: Any) -> str:
             errors = info.get("errors") or []
             for error in errors:
                 if isinstance(error, dict):
-                    parts.append(f"节点 {node_id}: {error.get('message') or error.get('type')}")
+                    parts.append(
+                        f"节点 {node_id}: {error.get('message') or error.get('type')}"
+                    )
         if len(parts) >= 3:
             break
-    return "；".join(parts) if parts else json.dumps(node_errors, ensure_ascii=False)[:300]
+    return (
+        "；".join(parts) if parts else json.dumps(node_errors, ensure_ascii=False)[:300]
+    )

@@ -2,24 +2,38 @@
   "default_provider": {
     "description": "默认生图渠道",
     "type": "string",
-    "hint": "不写渠道名时使用该渠道，例如 /draw 一只橘猫",
+    "hint": "不写渠道名时使用该渠道，例如 /draw 一只橘猫。各渠道的地址、密钥、模型和参数均在本配置表单中设置。",
+    "obvious_hint": true,
     "default": "gpt",
-    "options": ["gpt", "gemini", "comfyui", "seedream", "grok", "jimeng", "qwen"]
+    "options": [
+      "gpt",
+      "gemini",
+      "comfyui",
+      "seedream",
+      "grok",
+      "jimeng",
+      "qwen"
+    ]
   },
-  "default_width": {
-    "description": "默认图片宽度",
-    "type": "int",
-    "default": 1024
+  "test_connection_on_save": {
+    "description": "保存后测试连通性",
+    "type": "bool",
+    "hint": "开启后，保存配置触发的热重载、手动重载及启动时测试各渠道连接与延迟。完成后重新打开配置，查看下方最近测试时间和结果；结果框可拖动放大。仅 GET 只读请求，不生成图片；单渠道最长 15 秒，最多并发 3 个。关闭后保留上次结果。",
+    "obvious_hint": true,
+    "default": false
   },
-  "default_height": {
-    "description": "默认图片高度",
-    "type": "int",
-    "default": 1024
+  "connection_test_time": {
+    "description": "最近测试时间",
+    "type": "string",
+    "hint": "自动记录最近一次完成测试的服务器时间，含时区。测试后重新打开配置查看；无需手动填写。",
+    "default": "尚未测试"
   },
-  "default_count": {
-    "description": "默认生成数量",
-    "type": "int",
-    "default": 1
+  "connection_test_result": {
+    "description": "最近一次测试结果",
+    "type": "text",
+    "hint": "自动记录各渠道状态、延迟、HTTP 状态及失败原因，不显示地址或密钥。测试后重新打开配置查看，结果框可拖动放大；无需手动填写。连接通过不保证生图权限可用。",
+    "obvious_hint": true,
+    "default": "尚未测试。开启“保存后测试连通性”并保存，完成后重新打开配置查看结果。"
   },
   "max_count": {
     "description": "单次最多生成数量",
@@ -27,21 +41,15 @@
     "hint": "防止用户用 --n 参数一次请求过多图片",
     "default": 4
   },
-  "timeout": {
-    "description": "默认请求超时（秒）",
-    "type": "int",
-    "hint": "生图较慢时调大，ComfyUI 与即梦建议 180 以上",
-    "default": 180
-  },
   "enable_reference": {
-    "description": "启用图生图 / 垫图",
     "type": "bool",
-    "hint": "开启后，把参考图和提示词一起发送即可走图生图",
-    "default": true
+    "default": true,
+    "invisible": true
   },
   "max_references": {
-    "description": "最多使用几张参考图",
+    "description": "参考图数量上限（0 关闭图生图）",
     "type": "int",
+    "hint": "设为 0 时不读取参考图、不启用图生图；大于 0 时最多读取指定数量的参考图。",
     "default": 3
   },
   "reference_max_mb": {
@@ -53,12 +61,6 @@
     "description": "把本地参考图注册到 AstrBot 回调文件服务",
     "type": "bool",
     "hint": "即梦等只接受图片 URL 的接口需要开启；需要 AstrBot 已配置 callback_api_base",
-    "default": false
-  },
-  "force_download": {
-    "description": "全局强制代为下载图片",
-    "type": "bool",
-    "hint": "中转站返回的图片链接需要鉴权时开启，插件会带鉴权头下载后以本地文件发送",
     "default": false
   },
   "admin_only": {
@@ -84,7 +86,10 @@
     "type": "string",
     "hint": "user=每人独立计数（推荐，更公平）；group=整个群共用一个额度（更省额度）。私聊一律按人算",
     "default": "user",
-    "options": ["user", "group"]
+    "options": [
+      "user",
+      "group"
+    ]
   },
   "rate_limit_window_minutes": {
     "description": "统计窗口（分钟）",
@@ -134,12 +139,100 @@
     "hint": "填 0 表示不自动清理",
     "default": 30
   },
-
   "gpt": {
     "description": "GPT / OpenAI 兼容渠道（通用位）",
     "type": "object",
     "hint": "这是「通用 OpenAI 兼容位」：只要对方提供 OpenAI 协议的 /v1/images/generations（或退一步 /v1/chat/completions 能出图），不管背后实际是 GPT、FLUX、Stable Diffusion 还是别的模型，都填这里，无需改代码。官方 OpenAI 填 https://api.openai.com，中转站/第三方填其地址",
     "items": {
+      "parameter_preset": {
+        "description": "常用参数预设",
+        "type": "string",
+        "hint": "尺寸统一在此选择：场景预设、手动宽高，或当前模型与协议支持的原生档位／比例。模型自适应不换算成固定像素。更换模型或协议后，保存并重新打开配置以刷新选项；命令尺寸优先。",
+        "default": "custom",
+        "options": [
+          "avatar",
+          "portrait",
+          "landscape",
+          "wallpaper",
+          "cover",
+          "custom"
+        ],
+        "labels": [
+          "头像方图 · 1:1",
+          "竖版人像 · 3:4",
+          "横版插画 · 4:3",
+          "手机壁纸 · 9:16",
+          "宽屏封面 · 16:9",
+          "手动宽高"
+        ]
+      },
+      "native_resolution": {
+        "description": "模型分辨率档位",
+        "type": "string",
+        "default": "",
+        "options": [
+          ""
+        ],
+        "labels": [
+          "模型默认"
+        ],
+        "condition": {
+          "parameter_preset": "native"
+        },
+        "invisible": true,
+        "hint": "仅提供当前已保存模型与协议支持的档位。2K、4K 原样发送给模型，不代表固定宽高；历史未知档位保留供核对。"
+      },
+      "native_ratio": {
+        "description": "模型画面比例",
+        "type": "string",
+        "default": "",
+        "options": [
+          "",
+          "1:1",
+          "4:3",
+          "3:4",
+          "16:9",
+          "9:16",
+          "3:2",
+          "2:3",
+          "21:9"
+        ],
+        "labels": [
+          "模型默认",
+          "1:1",
+          "4:3",
+          "3:4",
+          "16:9",
+          "9:16",
+          "3:2",
+          "2:3",
+          "21:9"
+        ],
+        "condition": {
+          "parameter_preset": "native"
+        },
+        "invisible": true,
+        "hint": "仅在模型自适应模式生效。Seedream 的比例按提示词决定，不提供独立比例参数；模型或平台仍可能限制支持范围。"
+      },
+      "dimensions": {
+        "description": "手动宽高（宽:高）",
+        "type": "string",
+        "default": "0:0",
+        "condition": {
+          "parameter_preset": "custom"
+        },
+        "hint": "填写像素宽度:像素高度，例如 1080:1920 表示宽 1080、高 1920。0:0 表示未指定；只填一边时可用 1080:0，另一边回退为 1024。只在“手动宽高”模式生效，命令参数优先；模型可能限制可用尺寸。"
+      },
+      "width": {
+        "type": "int",
+        "default": 0,
+        "invisible": true
+      },
+      "height": {
+        "type": "int",
+        "default": 0,
+        "invisible": true
+      },
       "api_base": {
         "description": "API 地址",
         "type": "string",
@@ -156,23 +249,37 @@
       "model": {
         "description": "模型名称",
         "type": "string",
-        "hint": "填对方站上真实的模型名：官方 OpenAI 是 gpt-image-1；中转站可能是 gpt-4o-image、dall-e-3；第三方服务则是 flux-1.1-pro、sd3.5-large 之类。不确定就拉一下对方的 /v1/models",
+        "hint": "保存 API 地址和 Key 后自动读取生图模型目录，完成后重新打开配置，可在此直接选择并保存。读取失败或暂无候选时保留输入框；启用下方手动填写开关并保存后可输入自定义模型。目录可见不保证余额或生图权限。",
         "default": "gpt-image-1"
       },
+      "manual_model_input": {
+        "description": "手动填写模型名称",
+        "type": "bool",
+        "hint": "开启并保存后重新打开配置，模型名称改为手动输入；关闭并保存后恢复自动读取生图模型下拉。此开关不修改已保存的模型。",
+        "default": false
+      },
       "size": {
-        "description": "默认输出尺寸",
         "type": "string",
-        "hint": "留空则用全局的默认宽高（1024x1024）。gpt-image-1 只支持 1024x1024 / 1536x1024 / 1024x1536；dall-e-3 支持 1024x1024 / 1792x1024 / 1024x1792",
-        "default": ""
+        "default": "",
+        "invisible": true
       },
       "api_style": {
         "description": "调用协议",
         "type": "string",
         "hint": "auto=先试图片接口再回退对话接口；images=只用 /images/generations；chat=只用 /chat/completions",
         "default": "auto",
-        "options": ["auto", "images", "chat"]
+        "options": [
+          "auto",
+          "images",
+          "chat"
+        ]
       },
-      "timeout": {"description": "请求超时（秒）", "type": "int", "default": 180},
+      "timeout": {
+        "description": "请求超时（秒）",
+        "type": "int",
+        "default": 180,
+        "hint": "仅作用于本渠道的单次 HTTP 请求，生图较慢时可调大；异步任务总等待时长由本渠道的最长等待时间单独控制（若有该项）。"
+      },
       "extra_headers": {
         "description": "附加请求头",
         "type": "dict",
@@ -181,22 +288,130 @@
         "default": {}
       },
       "extra_body": {
-        "description": "附加请求体字段",
+        "description": "扩展请求参数",
         "type": "dict",
         "items": {},
-        "hint": "例如 {\"response_format\":\"b64_json\"}、{\"quality\":\"high\"}",
+        "hint": "仅补充没有专门配置项的扩展字段，例如 quality、response_format。模型、提示词、参考图、尺寸、原生分辨率、数量、种子和已提供专门设置的字段会被忽略；不能覆盖正式配置。支持 parameters、generationConfig、imageConfig 中的扩展字段；百炼扩展字段直接填写在此，插件会放入 parameters。",
         "default": {}
       },
-      "proxy": {"description": "HTTP(S) 代理", "type": "string", "hint": "例如 http://127.0.0.1:7890", "default": ""},
-      "verify_ssl": {"description": "校验 TLS 证书", "type": "bool", "hint": "自建自签名站点可关闭", "default": true},
-      "force_download": {"description": "强制代为下载图片", "type": "bool", "default": false}
+      "proxy": {
+        "description": "HTTP(S) 代理",
+        "type": "string",
+        "hint": "例如 http://127.0.0.1:7890",
+        "default": ""
+      },
+      "verify_ssl": {
+        "description": "校验 TLS 证书",
+        "type": "bool",
+        "hint": "自建自签名站点可关闭",
+        "default": true
+      },
+      "force_download": {
+        "description": "强制代为下载图片",
+        "type": "bool",
+        "default": false,
+        "hint": "仅作用于本渠道。图片链接需要鉴权时开启，由插件下载成本地文件发送；鉴权头只发送到与本渠道 API 同源的地址。"
+      },
+      "size_settings_version": {
+        "type": "int",
+        "default": 0,
+        "invisible": true
+      }
     }
   },
-
   "gemini": {
     "description": "Gemini / Imagen 渠道",
     "type": "object",
     "items": {
+      "parameter_preset": {
+        "description": "常用参数预设",
+        "type": "string",
+        "hint": "尺寸统一在此选择：场景预设、手动宽高，或当前模型与协议支持的原生档位／比例。模型自适应不换算成固定像素。更换模型或协议后，保存并重新打开配置以刷新选项；命令尺寸优先。",
+        "default": "custom",
+        "options": [
+          "avatar",
+          "portrait",
+          "landscape",
+          "wallpaper",
+          "cover",
+          "custom"
+        ],
+        "labels": [
+          "头像方图 · 1:1",
+          "竖版人像 · 3:4",
+          "横版插画 · 4:3",
+          "手机壁纸 · 9:16",
+          "宽屏封面 · 16:9",
+          "手动宽高"
+        ]
+      },
+      "native_resolution": {
+        "description": "模型分辨率档位",
+        "type": "string",
+        "default": "",
+        "options": [
+          ""
+        ],
+        "labels": [
+          "模型默认"
+        ],
+        "condition": {
+          "parameter_preset": "native"
+        },
+        "invisible": true,
+        "hint": "仅提供当前已保存模型与协议支持的档位。2K、4K 原样发送给模型，不代表固定宽高；历史未知档位保留供核对。"
+      },
+      "native_ratio": {
+        "description": "模型画面比例",
+        "type": "string",
+        "default": "",
+        "options": [
+          "",
+          "1:1",
+          "4:3",
+          "3:4",
+          "16:9",
+          "9:16",
+          "3:2",
+          "2:3",
+          "21:9"
+        ],
+        "labels": [
+          "模型默认",
+          "1:1",
+          "4:3",
+          "3:4",
+          "16:9",
+          "9:16",
+          "3:2",
+          "2:3",
+          "21:9"
+        ],
+        "condition": {
+          "parameter_preset": "native"
+        },
+        "invisible": true,
+        "hint": "仅在模型自适应模式生效。Seedream 的比例按提示词决定，不提供独立比例参数；模型或平台仍可能限制支持范围。"
+      },
+      "dimensions": {
+        "description": "手动宽高（宽:高）",
+        "type": "string",
+        "default": "0:0",
+        "condition": {
+          "parameter_preset": "custom"
+        },
+        "hint": "填写像素宽度:像素高度，例如 1080:1920 表示宽 1080、高 1920。0:0 表示未指定；只填一边时可用 1080:0，另一边回退为 1024。只在“手动宽高”模式生效，命令参数优先；模型可能限制可用尺寸。"
+      },
+      "width": {
+        "type": "int",
+        "default": 0,
+        "invisible": true
+      },
+      "height": {
+        "type": "int",
+        "default": 0,
+        "invisible": true
+      },
       "api_base": {
         "description": "API 地址",
         "type": "string",
@@ -213,22 +428,31 @@
       "model": {
         "description": "模型名称",
         "type": "string",
-        "hint": "例如 gemini-2.5-flash-image；imagen-* 会自动改走 :predict 接口",
+        "hint": "保存 API 地址和 Key 后自动读取生图模型目录，完成后重新打开配置，可在此直接选择并保存。读取失败或暂无候选时保留输入框；启用下方手动填写开关并保存后可输入自定义模型。目录可见不保证余额或生图权限。",
         "default": "gemini-2.5-flash-image"
       },
+      "manual_model_input": {
+        "description": "手动填写模型名称",
+        "type": "bool",
+        "hint": "开启并保存后重新打开配置，模型名称改为手动输入；关闭并保存后恢复自动读取生图模型下拉。此开关不修改已保存的模型。",
+        "default": false
+      },
       "ratio": {
-        "description": "默认画面比例",
         "type": "string",
-        "hint": "留空则按图片宽高自动换算；也可用 /draw gemini --ratio 16:9 单次指定。原生协议下需要同时开启「始终发送画面比例」才会带上",
         "default": "",
-        "options": ["", "1:1", "4:3", "3:4", "16:9", "9:16", "3:2", "2:3", "21:9"]
+        "invisible": true
       },
       "api_style": {
         "description": "调用协议",
         "type": "string",
         "hint": "auto=原生协议失败后自动回退 OpenAI 兼容层；native=只用原生；gemini_openai=/v1beta/openai；openai=/v1 中转站协议",
         "default": "auto",
-        "options": ["auto", "native", "gemini_openai", "openai"]
+        "options": [
+          "auto",
+          "native",
+          "gemini_openai",
+          "openai"
+        ]
       },
       "response_modalities": {
         "description": "返回模态",
@@ -237,25 +461,146 @@
         "default": "TEXT,IMAGE"
       },
       "send_aspect_ratio": {
-        "description": "始终发送画面比例",
         "type": "bool",
-        "hint": "开启后原生协议会带上 imageConfig.aspectRatio。注意：不支持该配置的模型会直接报错（不是忽略），所以默认关闭；需要时也可以用 /draw gemini --ratio 16:9 单次指定",
-        "default": false
+        "default": false,
+        "invisible": true
       },
-      "timeout": {"description": "请求超时（秒）", "type": "int", "default": 180},
-      "extra_headers": {"description": "附加请求头", "type": "dict", "items": {}, "default": {}},
-      "extra_body": {"description": "附加请求体字段", "type": "dict", "items": {}, "default": {}},
-      "proxy": {"description": "HTTP(S) 代理", "type": "string", "default": ""},
-      "verify_ssl": {"description": "校验 TLS 证书", "type": "bool", "default": true},
-      "force_download": {"description": "强制代为下载图片", "type": "bool", "default": false}
+      "timeout": {
+        "description": "请求超时（秒）",
+        "type": "int",
+        "default": 180,
+        "hint": "仅作用于本渠道的单次 HTTP 请求，生图较慢时可调大；异步任务总等待时长由本渠道的最长等待时间单独控制（若有该项）。"
+      },
+      "extra_headers": {
+        "description": "附加请求头",
+        "type": "dict",
+        "items": {},
+        "default": {}
+      },
+      "extra_body": {
+        "description": "扩展请求参数",
+        "type": "dict",
+        "items": {},
+        "default": {},
+        "hint": "仅补充没有专门配置项的扩展字段，例如 quality、response_format。模型、提示词、参考图、尺寸、原生分辨率、数量、种子和已提供专门设置的字段会被忽略；不能覆盖正式配置。支持 parameters、generationConfig、imageConfig 中的扩展字段；百炼扩展字段直接填写在此，插件会放入 parameters。"
+      },
+      "proxy": {
+        "description": "HTTP(S) 代理",
+        "type": "string",
+        "default": ""
+      },
+      "verify_ssl": {
+        "description": "校验 TLS 证书",
+        "type": "bool",
+        "default": true
+      },
+      "force_download": {
+        "description": "强制代为下载图片",
+        "type": "bool",
+        "default": false,
+        "hint": "仅作用于本渠道。图片链接需要鉴权时开启，由插件下载成本地文件发送；鉴权头只发送到与本渠道 API 同源的地址。"
+      },
+      "size_settings_version": {
+        "type": "int",
+        "default": 0,
+        "invisible": true
+      }
     }
   },
-
   "comfyui": {
     "description": "ComfyUI 渠道",
     "type": "object",
     "hint": "⚠️ 只在自己部署了 ComfyUI 时才需要配置，没装就整块留空、不影响其它渠道。地址默认留空，需要时填 ComfyUI 的根地址（如 http://127.0.0.1:8188）；这个渠道是否可用只看「工作流模板」有没有内容",
     "items": {
+      "parameter_preset": {
+        "description": "常用参数预设",
+        "type": "string",
+        "hint": "尺寸统一在此选择：场景预设、手动宽高，或当前模型与协议支持的原生档位／比例。模型自适应不换算成固定像素。更换模型或协议后，保存并重新打开配置以刷新选项；命令尺寸优先。",
+        "default": "custom",
+        "options": [
+          "avatar",
+          "portrait",
+          "landscape",
+          "wallpaper",
+          "cover",
+          "custom"
+        ],
+        "labels": [
+          "头像方图 · 1:1",
+          "竖版人像 · 3:4",
+          "横版插画 · 4:3",
+          "手机壁纸 · 9:16",
+          "宽屏封面 · 16:9",
+          "手动宽高"
+        ]
+      },
+      "native_resolution": {
+        "description": "模型分辨率档位",
+        "type": "string",
+        "default": "",
+        "options": [
+          ""
+        ],
+        "labels": [
+          "模型默认"
+        ],
+        "condition": {
+          "parameter_preset": "native"
+        },
+        "invisible": true,
+        "hint": "仅提供当前已保存模型与协议支持的档位。2K、4K 原样发送给模型，不代表固定宽高；历史未知档位保留供核对。"
+      },
+      "native_ratio": {
+        "description": "模型画面比例",
+        "type": "string",
+        "default": "",
+        "options": [
+          "",
+          "1:1",
+          "4:3",
+          "3:4",
+          "16:9",
+          "9:16",
+          "3:2",
+          "2:3",
+          "21:9"
+        ],
+        "labels": [
+          "模型默认",
+          "1:1",
+          "4:3",
+          "3:4",
+          "16:9",
+          "9:16",
+          "3:2",
+          "2:3",
+          "21:9"
+        ],
+        "condition": {
+          "parameter_preset": "native"
+        },
+        "invisible": true,
+        "hint": "仅在模型自适应模式生效。Seedream 的比例按提示词决定，不提供独立比例参数；模型或平台仍可能限制支持范围。"
+      },
+      "dimensions": {
+        "description": "手动宽高（宽:高）",
+        "type": "string",
+        "default": "0:0",
+        "condition": {
+          "parameter_preset": "custom"
+        },
+        "hint": "填写像素宽度:像素高度，例如 1080:1920 表示宽 1080、高 1920。0:0 表示未指定；只填一边时可用 1080:0，另一边回退为 1024。只在“手动宽高”模式生效，命令参数优先；模型可能限制可用尺寸。"
+      },
+      "width": {
+        "type": "int",
+        "default": 0,
+        "invisible": true
+      },
+      "height": {
+        "type": "int",
+        "default": 0,
+        "invisible": true
+      },
       "api_base": {
         "description": "ComfyUI 地址",
         "type": "string",
@@ -357,24 +702,135 @@
         "default": "",
         "invisible": true
       },
-      "timeout": {"description": "单次请求超时（秒）", "type": "int", "default": 60},
-      "extra_headers": {"description": "附加请求头", "type": "dict", "items": {}, "default": {}},
-      "proxy": {"description": "HTTP(S) 代理", "type": "string", "default": ""},
-      "verify_ssl": {"description": "校验 TLS 证书", "type": "bool", "default": true},
+      "timeout": {
+        "description": "单次请求超时（秒）",
+        "type": "int",
+        "default": 60,
+        "hint": "仅作用于本渠道的单次 HTTP 请求，生图较慢时可调大；异步任务总等待时长由本渠道的最长等待时间单独控制（若有该项）。"
+      },
+      "extra_headers": {
+        "description": "附加请求头",
+        "type": "dict",
+        "items": {},
+        "default": {}
+      },
+      "proxy": {
+        "description": "HTTP(S) 代理",
+        "type": "string",
+        "default": ""
+      },
+      "verify_ssl": {
+        "description": "校验 TLS 证书",
+        "type": "bool",
+        "default": true
+      },
       "force_download": {
         "description": "强制代为下载图片",
         "type": "bool",
-        "hint": "ComfyUI 返回的是 Base64，本项对其无影响",
+        "hint": "仅作用于本渠道。图片链接需要鉴权时开启，由插件下载成本地文件发送；鉴权头只发送到与本渠道 API 同源的地址。",
         "default": false
+      },
+      "size_settings_version": {
+        "type": "int",
+        "default": 0,
+        "invisible": true
       }
     }
   },
-
   "seedream": {
     "description": "Seedream（火山方舟）渠道",
     "type": "object",
     "hint": "官方参数表里没有 n 和 seed，多图需用组图能力；参数被拒时插件会自动摘掉该字段重试",
     "items": {
+      "parameter_preset": {
+        "description": "常用参数预设",
+        "type": "string",
+        "hint": "尺寸统一在此选择：场景预设、手动宽高，或当前模型与协议支持的原生档位／比例。模型自适应不换算成固定像素。更换模型或协议后，保存并重新打开配置以刷新选项；命令尺寸优先。",
+        "default": "custom",
+        "options": [
+          "avatar",
+          "portrait",
+          "landscape",
+          "wallpaper",
+          "cover",
+          "custom"
+        ],
+        "labels": [
+          "头像方图 · 1:1",
+          "竖版人像 · 3:4",
+          "横版插画 · 4:3",
+          "手机壁纸 · 9:16",
+          "宽屏封面 · 16:9",
+          "手动宽高"
+        ]
+      },
+      "native_resolution": {
+        "description": "模型分辨率档位",
+        "type": "string",
+        "default": "",
+        "options": [
+          ""
+        ],
+        "labels": [
+          "模型默认"
+        ],
+        "condition": {
+          "parameter_preset": "native"
+        },
+        "invisible": true,
+        "hint": "仅提供当前已保存模型与协议支持的档位。2K、4K 原样发送给模型，不代表固定宽高；历史未知档位保留供核对。"
+      },
+      "native_ratio": {
+        "description": "模型画面比例",
+        "type": "string",
+        "default": "",
+        "options": [
+          "",
+          "1:1",
+          "4:3",
+          "3:4",
+          "16:9",
+          "9:16",
+          "3:2",
+          "2:3",
+          "21:9"
+        ],
+        "labels": [
+          "模型默认",
+          "1:1",
+          "4:3",
+          "3:4",
+          "16:9",
+          "9:16",
+          "3:2",
+          "2:3",
+          "21:9"
+        ],
+        "condition": {
+          "parameter_preset": "native"
+        },
+        "invisible": true,
+        "hint": "仅在模型自适应模式生效。Seedream 的比例按提示词决定，不提供独立比例参数；模型或平台仍可能限制支持范围。"
+      },
+      "dimensions": {
+        "description": "手动宽高（宽:高）",
+        "type": "string",
+        "default": "0:0",
+        "condition": {
+          "parameter_preset": "custom"
+        },
+        "hint": "填写像素宽度:像素高度，例如 1080:1920 表示宽 1080、高 1920。0:0 表示未指定；只填一边时可用 1080:0，另一边回退为 1024。只在“手动宽高”模式生效，命令参数优先；模型可能限制可用尺寸。"
+      },
+      "width": {
+        "type": "int",
+        "default": 0,
+        "invisible": true
+      },
+      "height": {
+        "type": "int",
+        "default": 0,
+        "invisible": true
+      },
       "api_base": {
         "description": "API 地址",
         "type": "string",
@@ -391,14 +847,19 @@
       "model": {
         "description": "模型 ID",
         "type": "string",
-        "hint": "需带日期后缀，例如 doubao-seedream-4-0-250828；国际区不带 doubao- 前缀。⚠️ SeedEdit（*seededit*）是图像编辑模型，必须带参考图，纯文字生图请选 Seedream",
+        "hint": "保存 API 地址和 Key 后自动读取生图模型目录，完成后重新打开配置，可在此直接选择并保存。读取失败或暂无候选时保留输入框；启用下方手动填写开关并保存后可输入自定义模型。目录可见不保证余额或生图权限。",
         "default": "doubao-seedream-4-0-250828"
       },
+      "manual_model_input": {
+        "description": "手动填写模型名称",
+        "type": "bool",
+        "hint": "开启并保存后重新打开配置，模型名称改为手动输入；关闭并保存后恢复自动读取生图模型下拉。此开关不修改已保存的模型。",
+        "default": false
+      },
       "size": {
-        "description": "输出尺寸",
         "type": "string",
-        "hint": "档位 1K/1.5K/2K/3K/4K（大写 K），或 2048x2048 这种像素写法，两者不可混用",
-        "default": "2K"
+        "default": "",
+        "invisible": true
       },
       "watermark": {
         "description": "添加水印",
@@ -410,19 +871,141 @@
         "type": "bool",
         "default": false
       },
-      "timeout": {"description": "请求超时（秒）", "type": "int", "default": 180},
-      "extra_headers": {"description": "附加请求头", "type": "dict", "items": {}, "default": {}},
-      "extra_body": {"description": "附加请求体字段", "type": "dict", "items": {}, "default": {}},
-      "proxy": {"description": "HTTP(S) 代理", "type": "string", "default": ""},
-      "verify_ssl": {"description": "校验 TLS 证书", "type": "bool", "default": true},
-      "force_download": {"description": "强制代为下载图片", "type": "bool", "default": false}
+      "timeout": {
+        "description": "请求超时（秒）",
+        "type": "int",
+        "default": 180,
+        "hint": "仅作用于本渠道的单次 HTTP 请求，生图较慢时可调大；异步任务总等待时长由本渠道的最长等待时间单独控制（若有该项）。"
+      },
+      "extra_headers": {
+        "description": "附加请求头",
+        "type": "dict",
+        "items": {},
+        "default": {}
+      },
+      "extra_body": {
+        "description": "扩展请求参数",
+        "type": "dict",
+        "items": {},
+        "default": {},
+        "hint": "仅补充没有专门配置项的扩展字段，例如 quality、response_format。模型、提示词、参考图、尺寸、原生分辨率、数量、种子和已提供专门设置的字段会被忽略；不能覆盖正式配置。支持 parameters、generationConfig、imageConfig 中的扩展字段；百炼扩展字段直接填写在此，插件会放入 parameters。"
+      },
+      "proxy": {
+        "description": "HTTP(S) 代理",
+        "type": "string",
+        "default": ""
+      },
+      "verify_ssl": {
+        "description": "校验 TLS 证书",
+        "type": "bool",
+        "default": true
+      },
+      "force_download": {
+        "description": "强制代为下载图片",
+        "type": "bool",
+        "default": false,
+        "hint": "仅作用于本渠道。图片链接需要鉴权时开启，由插件下载成本地文件发送；鉴权头只发送到与本渠道 API 同源的地址。"
+      },
+      "size_settings_version": {
+        "type": "int",
+        "default": 0,
+        "invisible": true
+      }
     }
   },
-
   "grok": {
     "description": "Grok（xAI）渠道",
     "type": "object",
     "items": {
+      "parameter_preset": {
+        "description": "常用参数预设",
+        "type": "string",
+        "hint": "尺寸统一在此选择：场景预设、手动宽高，或当前模型与协议支持的原生档位／比例。模型自适应不换算成固定像素。更换模型或协议后，保存并重新打开配置以刷新选项；命令尺寸优先。",
+        "default": "custom",
+        "options": [
+          "avatar",
+          "portrait",
+          "landscape",
+          "wallpaper",
+          "cover",
+          "custom"
+        ],
+        "labels": [
+          "头像方图 · 1:1",
+          "竖版人像 · 3:4",
+          "横版插画 · 4:3",
+          "手机壁纸 · 9:16",
+          "宽屏封面 · 16:9",
+          "手动宽高"
+        ]
+      },
+      "native_resolution": {
+        "description": "模型分辨率档位",
+        "type": "string",
+        "default": "",
+        "options": [
+          ""
+        ],
+        "labels": [
+          "模型默认"
+        ],
+        "condition": {
+          "parameter_preset": "native"
+        },
+        "invisible": true,
+        "hint": "仅提供当前已保存模型与协议支持的档位。2K、4K 原样发送给模型，不代表固定宽高；历史未知档位保留供核对。"
+      },
+      "native_ratio": {
+        "description": "模型画面比例",
+        "type": "string",
+        "default": "",
+        "options": [
+          "",
+          "1:1",
+          "4:3",
+          "3:4",
+          "16:9",
+          "9:16",
+          "3:2",
+          "2:3",
+          "21:9"
+        ],
+        "labels": [
+          "模型默认",
+          "1:1",
+          "4:3",
+          "3:4",
+          "16:9",
+          "9:16",
+          "3:2",
+          "2:3",
+          "21:9"
+        ],
+        "condition": {
+          "parameter_preset": "native"
+        },
+        "invisible": true,
+        "hint": "仅在模型自适应模式生效。Seedream 的比例按提示词决定，不提供独立比例参数；模型或平台仍可能限制支持范围。"
+      },
+      "dimensions": {
+        "description": "手动宽高（宽:高）",
+        "type": "string",
+        "default": "0:0",
+        "condition": {
+          "parameter_preset": "custom"
+        },
+        "hint": "填写像素宽度:像素高度，例如 1080:1920 表示宽 1080、高 1920。0:0 表示未指定；只填一边时可用 1080:0，另一边回退为 1024。只在“手动宽高”模式生效，命令参数优先；模型可能限制可用尺寸。"
+      },
+      "width": {
+        "type": "int",
+        "default": 0,
+        "invisible": true
+      },
+      "height": {
+        "type": "int",
+        "default": 0,
+        "invisible": true
+      },
       "api_base": {
         "description": "API 地址",
         "type": "string",
@@ -439,15 +1022,19 @@
       "model": {
         "description": "文生图模型",
         "type": "string",
-        "hint": "官方当前为 grok-imagine-image-2.0；老中转站可能只认 grok-imagine-1.0",
-        "default": "grok-imagine-image-2.0",
-        "options": ["grok-imagine-image-2.0", "grok-imagine-1.0", "grok-2-image-1212"]
+        "hint": "保存 API 地址和 Key 后自动读取生图模型目录，完成后重新打开配置，可在此直接选择并保存。读取失败或暂无候选时保留输入框；启用下方手动填写开关并保存后可输入自定义模型。目录可见不保证余额或生图权限。",
+        "default": "grok-imagine-image-2.0"
+      },
+      "manual_model_input": {
+        "description": "手动填写模型名称",
+        "type": "bool",
+        "hint": "开启并保存后重新打开配置，模型名称改为手动输入；关闭并保存后恢复自动读取生图模型下拉。此开关不修改已保存的模型。",
+        "default": false
       },
       "size": {
-        "description": "默认输出尺寸",
         "type": "string",
-        "hint": "留空则用全局默认宽高。官方接口其实没有 size 字段，需要发官方字段时把下面的「尺寸参数写法」改成 aspect_ratio",
-        "default": ""
+        "default": "",
+        "invisible": true
       },
       "edit_model": {
         "description": "图生图模型",
@@ -460,36 +1047,169 @@
         "type": "string",
         "hint": "size=发 OpenAI 风格的 size（中转站常用）；aspect_ratio=发官方的 aspect_ratio + resolution",
         "default": "size",
-        "options": ["size", "aspect_ratio"]
+        "options": [
+          "size",
+          "aspect_ratio"
+        ]
       },
       "edit_mode": {
         "description": "图生图请求格式",
         "type": "string",
         "hint": "auto=先按官方 JSON 发，失败再退回 multipart；官方接口只认 json，部分中转站只认 multipart",
         "default": "auto",
-        "options": ["auto", "json", "multipart"]
+        "options": [
+          "auto",
+          "json",
+          "multipart"
+        ]
       },
       "api_style": {
         "description": "调用协议",
         "type": "string",
         "hint": "auto=图片接口失败后回退对话接口",
         "default": "auto",
-        "options": ["auto", "images", "chat"]
+        "options": [
+          "auto",
+          "images",
+          "chat"
+        ]
       },
-      "timeout": {"description": "请求超时（秒）", "type": "int", "default": 180},
-      "extra_headers": {"description": "附加请求头", "type": "dict", "items": {}, "default": {}},
-      "extra_body": {"description": "附加请求体字段", "type": "dict", "items": {}, "default": {}},
-      "proxy": {"description": "HTTP(S) 代理", "type": "string", "default": ""},
-      "verify_ssl": {"description": "校验 TLS 证书", "type": "bool", "default": true},
-      "force_download": {"description": "强制代为下载图片", "type": "bool", "default": false}
+      "timeout": {
+        "description": "请求超时（秒）",
+        "type": "int",
+        "default": 180,
+        "hint": "仅作用于本渠道的单次 HTTP 请求，生图较慢时可调大；异步任务总等待时长由本渠道的最长等待时间单独控制（若有该项）。"
+      },
+      "extra_headers": {
+        "description": "附加请求头",
+        "type": "dict",
+        "items": {},
+        "default": {}
+      },
+      "extra_body": {
+        "description": "扩展请求参数",
+        "type": "dict",
+        "items": {},
+        "default": {},
+        "hint": "仅补充没有专门配置项的扩展字段，例如 quality、response_format。模型、提示词、参考图、尺寸、原生分辨率、数量、种子和已提供专门设置的字段会被忽略；不能覆盖正式配置。支持 parameters、generationConfig、imageConfig 中的扩展字段；百炼扩展字段直接填写在此，插件会放入 parameters。"
+      },
+      "proxy": {
+        "description": "HTTP(S) 代理",
+        "type": "string",
+        "default": ""
+      },
+      "verify_ssl": {
+        "description": "校验 TLS 证书",
+        "type": "bool",
+        "default": true
+      },
+      "force_download": {
+        "description": "强制代为下载图片",
+        "type": "bool",
+        "default": false,
+        "hint": "仅作用于本渠道。图片链接需要鉴权时开启，由插件下载成本地文件发送；鉴权头只发送到与本渠道 API 同源的地址。"
+      },
+      "size_settings_version": {
+        "type": "int",
+        "default": 0,
+        "invisible": true
+      }
     }
   },
-
   "jimeng": {
     "description": "即梦渠道",
     "type": "object",
     "hint": "⚠️ 只在自己搭了 jimeng-2api / jimeng-free-api 这类转换服务时才需要配置：地址默认留空，需要时填自己那个服务的地址（如 http://localhost:5100）；没搭服务就整块留空",
     "items": {
+      "parameter_preset": {
+        "description": "常用参数预设",
+        "type": "string",
+        "hint": "尺寸统一在此选择：场景预设、手动宽高，或当前模型与协议支持的原生档位／比例。模型自适应不换算成固定像素。更换模型或协议后，保存并重新打开配置以刷新选项；命令尺寸优先。",
+        "default": "custom",
+        "options": [
+          "avatar",
+          "portrait",
+          "landscape",
+          "wallpaper",
+          "cover",
+          "custom"
+        ],
+        "labels": [
+          "头像方图 · 1:1",
+          "竖版人像 · 3:4",
+          "横版插画 · 4:3",
+          "手机壁纸 · 9:16",
+          "宽屏封面 · 16:9",
+          "手动宽高"
+        ]
+      },
+      "native_resolution": {
+        "description": "模型分辨率档位",
+        "type": "string",
+        "default": "",
+        "options": [
+          ""
+        ],
+        "labels": [
+          "模型默认"
+        ],
+        "condition": {
+          "parameter_preset": "native"
+        },
+        "invisible": true,
+        "hint": "仅提供当前已保存模型与协议支持的档位。2K、4K 原样发送给模型，不代表固定宽高；历史未知档位保留供核对。"
+      },
+      "native_ratio": {
+        "description": "模型画面比例",
+        "type": "string",
+        "default": "",
+        "options": [
+          "",
+          "1:1",
+          "4:3",
+          "3:4",
+          "16:9",
+          "9:16",
+          "3:2",
+          "2:3",
+          "21:9"
+        ],
+        "labels": [
+          "模型默认",
+          "1:1",
+          "4:3",
+          "3:4",
+          "16:9",
+          "9:16",
+          "3:2",
+          "2:3",
+          "21:9"
+        ],
+        "condition": {
+          "parameter_preset": "native"
+        },
+        "invisible": true,
+        "hint": "仅在模型自适应模式生效。“智能自动”根据提示词或参考图选择比例，支持情况取决于服务端和模型（如 jimeng-4.0／4.1／4.5／4.6／5.0）。选择固定比例会关闭智能比例；场景预设、手动宽高和单次命令尺寸优先。"
+      },
+      "dimensions": {
+        "description": "手动宽高（宽:高）",
+        "type": "string",
+        "default": "0:0",
+        "condition": {
+          "parameter_preset": "custom"
+        },
+        "hint": "填写像素宽度:像素高度，例如 1080:1920 表示宽 1080、高 1920。0:0 表示未指定；只填一边时可用 1080:0，另一边回退为 1024。只在“手动宽高”模式生效，命令参数优先；模型可能限制可用尺寸。"
+      },
+      "width": {
+        "type": "int",
+        "default": 0,
+        "invisible": true
+      },
+      "height": {
+        "type": "int",
+        "default": 0,
+        "invisible": true
+      },
       "api_base": {
         "description": "API 地址",
         "type": "string",
@@ -508,35 +1228,28 @@
         "description": "模型名称",
         "type": "string",
         "default": "jimeng-4.0",
-        "options": [
-          "jimeng-4.1",
-          "jimeng-4.0",
-          "jimeng-3.1",
-          "jimeng-3.0",
-          "jimeng-2.1",
-          "jimeng-xl-pro",
-          "nanobanana",
-          "nanobananapro"
-        ]
+        "hint": "保存 API 地址和 Key 后自动读取生图模型目录，完成后重新打开配置，可在此直接选择并保存。读取失败或暂无候选时保留输入框；启用下方手动填写开关并保存后可输入自定义模型。目录可见不保证余额或生图权限。"
+      },
+      "manual_model_input": {
+        "description": "手动填写模型名称",
+        "type": "bool",
+        "hint": "开启并保存后重新打开配置，模型名称改为手动输入；关闭并保存后恢复自动读取生图模型下拉。此开关不修改已保存的模型。",
+        "default": false
       },
       "ratio": {
-        "description": "默认画面比例",
         "type": "string",
-        "hint": "留空则按图片宽高自动换算",
         "default": "",
-        "options": ["", "1:1", "4:3", "3:4", "16:9", "9:16", "3:2", "2:3", "21:9"]
+        "invisible": true
       },
       "resolution": {
-        "description": "默认分辨率",
         "type": "string",
-        "default": "2k",
-        "options": ["1k", "2k", "4k"]
+        "default": "",
+        "invisible": true
       },
       "intelligent_ratio": {
-        "description": "启用智能比例",
         "type": "bool",
-        "hint": "仅部分模型支持，不支持的模型会被服务端忽略",
-        "default": false
+        "default": false,
+        "invisible": true
       },
       "sample_strength": {
         "description": "图生图采样强度",
@@ -549,29 +1262,159 @@
         "type": "string",
         "hint": "data_uri=发 data:image/...;base64；base64=只发裸 Base64。若服务端两者都不认，请开启全局的「注册到回调文件服务」让它改用 URL",
         "default": "data_uri",
-        "options": ["data_uri", "base64"]
+        "options": [
+          "data_uri",
+          "base64"
+        ]
       },
       "api_style": {
         "description": "调用协议",
         "type": "string",
         "hint": "auto=图生图走 /images/compositions，文生图走 /images/generations；openai=改用中转站的 OpenAI 协议",
         "default": "auto",
-        "options": ["auto", "images", "compositions", "chat"]
+        "options": [
+          "auto",
+          "images",
+          "compositions",
+          "chat"
+        ]
       },
-      "timeout": {"description": "请求超时（秒）", "type": "int", "default": 180},
-      "extra_headers": {"description": "附加请求头", "type": "dict", "items": {}, "default": {}},
-      "extra_body": {"description": "附加请求体字段", "type": "dict", "items": {}, "default": {}},
-      "proxy": {"description": "HTTP(S) 代理", "type": "string", "default": ""},
-      "verify_ssl": {"description": "校验 TLS 证书", "type": "bool", "default": true},
-      "force_download": {"description": "强制代为下载图片", "type": "bool", "default": false}
+      "timeout": {
+        "description": "请求超时（秒）",
+        "type": "int",
+        "default": 180,
+        "hint": "仅作用于本渠道的单次 HTTP 请求，生图较慢时可调大；异步任务总等待时长由本渠道的最长等待时间单独控制（若有该项）。"
+      },
+      "extra_headers": {
+        "description": "附加请求头",
+        "type": "dict",
+        "items": {},
+        "default": {}
+      },
+      "extra_body": {
+        "description": "扩展请求参数",
+        "type": "dict",
+        "items": {},
+        "default": {},
+        "hint": "仅补充没有专门配置项的扩展字段，例如 quality、response_format。模型、提示词、参考图、尺寸、原生分辨率、数量、种子和已提供专门设置的字段会被忽略；不能覆盖正式配置。支持 parameters、generationConfig、imageConfig 中的扩展字段；百炼扩展字段直接填写在此，插件会放入 parameters。"
+      },
+      "proxy": {
+        "description": "HTTP(S) 代理",
+        "type": "string",
+        "default": ""
+      },
+      "verify_ssl": {
+        "description": "校验 TLS 证书",
+        "type": "bool",
+        "default": true
+      },
+      "force_download": {
+        "description": "强制代为下载图片",
+        "type": "bool",
+        "default": false,
+        "hint": "仅作用于本渠道。图片链接需要鉴权时开启，由插件下载成本地文件发送；鉴权头只发送到与本渠道 API 同源的地址。"
+      },
+      "size_settings_version": {
+        "type": "int",
+        "default": 0,
+        "invisible": true
+      }
     }
   },
-
   "qwen": {
     "description": "阿里云百炼（通义万相 / qwen-image）渠道",
     "type": "object",
     "hint": "百炼的图片生成不在 OpenAI 兼容层里，必须走原生 API，插件已自动处理同步与异步两条路径",
     "items": {
+      "parameter_preset": {
+        "description": "常用参数预设",
+        "type": "string",
+        "hint": "尺寸统一在此选择：场景预设、手动宽高，或当前模型与协议支持的原生档位／比例。模型自适应不换算成固定像素。更换模型或协议后，保存并重新打开配置以刷新选项；命令尺寸优先。",
+        "default": "custom",
+        "options": [
+          "avatar",
+          "portrait",
+          "landscape",
+          "wallpaper",
+          "cover",
+          "custom"
+        ],
+        "labels": [
+          "头像方图 · 1:1",
+          "竖版人像 · 3:4",
+          "横版插画 · 4:3",
+          "手机壁纸 · 9:16",
+          "宽屏封面 · 16:9",
+          "手动宽高"
+        ]
+      },
+      "native_resolution": {
+        "description": "模型分辨率档位",
+        "type": "string",
+        "default": "",
+        "options": [
+          ""
+        ],
+        "labels": [
+          "模型默认"
+        ],
+        "condition": {
+          "parameter_preset": "native"
+        },
+        "invisible": true,
+        "hint": "仅提供当前已保存模型与协议支持的档位。2K、4K 原样发送给模型，不代表固定宽高；历史未知档位保留供核对。"
+      },
+      "native_ratio": {
+        "description": "模型画面比例",
+        "type": "string",
+        "default": "",
+        "options": [
+          "",
+          "1:1",
+          "4:3",
+          "3:4",
+          "16:9",
+          "9:16",
+          "3:2",
+          "2:3",
+          "21:9"
+        ],
+        "labels": [
+          "模型默认",
+          "1:1",
+          "4:3",
+          "3:4",
+          "16:9",
+          "9:16",
+          "3:2",
+          "2:3",
+          "21:9"
+        ],
+        "condition": {
+          "parameter_preset": "native"
+        },
+        "invisible": true,
+        "hint": "仅在模型自适应模式生效。Seedream 的比例按提示词决定，不提供独立比例参数；模型或平台仍可能限制支持范围。"
+      },
+      "dimensions": {
+        "description": "手动宽高（宽:高）",
+        "type": "string",
+        "default": "0:0",
+        "condition": {
+          "parameter_preset": "custom"
+        },
+        "hint": "填写像素宽度:像素高度，例如 1080:1920 表示宽 1080、高 1920。0:0 表示未指定；只填一边时可用 1080:0，另一边回退为 1024。只在“手动宽高”模式生效，命令参数优先；模型可能限制可用尺寸。"
+      },
+      "width": {
+        "type": "int",
+        "default": 0,
+        "invisible": true
+      },
+      "height": {
+        "type": "int",
+        "default": 0,
+        "invisible": true
+      },
       "api_base": {
         "description": "API 地址",
         "type": "string",
@@ -604,10 +1447,9 @@
         ]
       },
       "size": {
-        "description": "输出尺寸",
         "type": "string",
-        "hint": "用 * 分隔，如 1328*1328。留空则交给服务端默认值（推荐，各模型支持的尺寸集合不同）",
-        "default": ""
+        "default": "",
+        "invisible": true
       },
       "watermark": {
         "description": "添加水印",
@@ -635,14 +1477,52 @@
         "type": "string",
         "hint": "auto=按模型名自动选择；multimodal=强制同步多模态；text2image=强制异步任务",
         "default": "auto",
-        "options": ["auto", "multimodal", "text2image"]
+        "options": [
+          "auto",
+          "multimodal",
+          "text2image"
+        ]
       },
-      "timeout": {"description": "请求超时（秒）", "type": "int", "default": 180},
-      "extra_headers": {"description": "附加请求头", "type": "dict", "items": {}, "default": {}},
-      "extra_body": {"description": "附加请求体字段", "type": "dict", "items": {}, "default": {}},
-      "proxy": {"description": "HTTP(S) 代理", "type": "string", "default": ""},
-      "verify_ssl": {"description": "校验 TLS 证书", "type": "bool", "default": true},
-      "force_download": {"description": "强制代为下载图片", "type": "bool", "default": false}
+      "timeout": {
+        "description": "请求超时（秒）",
+        "type": "int",
+        "default": 180,
+        "hint": "仅作用于本渠道的单次 HTTP 请求，生图较慢时可调大；异步任务总等待时长由本渠道的最长等待时间单独控制（若有该项）。"
+      },
+      "extra_headers": {
+        "description": "附加请求头",
+        "type": "dict",
+        "items": {},
+        "default": {}
+      },
+      "extra_body": {
+        "description": "扩展请求参数",
+        "type": "dict",
+        "items": {},
+        "default": {},
+        "hint": "仅补充没有专门配置项的扩展字段，例如 quality、response_format。模型、提示词、参考图、尺寸、原生分辨率、数量、种子和已提供专门设置的字段会被忽略；不能覆盖正式配置。支持 parameters、generationConfig、imageConfig 中的扩展字段；百炼扩展字段直接填写在此，插件会放入 parameters。"
+      },
+      "proxy": {
+        "description": "HTTP(S) 代理",
+        "type": "string",
+        "default": ""
+      },
+      "verify_ssl": {
+        "description": "校验 TLS 证书",
+        "type": "bool",
+        "default": true
+      },
+      "force_download": {
+        "description": "强制代为下载图片",
+        "type": "bool",
+        "default": false,
+        "hint": "仅作用于本渠道。图片链接需要鉴权时开启，由插件下载成本地文件发送；鉴权头只发送到与本渠道 API 同源的地址。"
+      },
+      "size_settings_version": {
+        "type": "int",
+        "default": 0,
+        "invisible": true
+      }
     }
   }
 }

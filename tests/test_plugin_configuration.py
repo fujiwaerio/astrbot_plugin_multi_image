@@ -19,6 +19,9 @@ def load_plugin():
         "astrbot.api.event",
         "astrbot.api.star",
         "astrbot.api.message_components",
+        "astrbot.core",
+        "astrbot.core.utils",
+        "astrbot.core.utils.astrbot_path",
     ):
         modules[name] = types.ModuleType(name)
         modules[name].__path__ = []
@@ -34,6 +37,13 @@ def load_plugin():
 
     star = modules["astrbot.api.star"]
     star.Star, star.Context, star.StarTools = Star, object, object
+
+    def unavailable_data_path():
+        raise OSError("Test must explicitly supply an isolated AstrBot data path")
+
+    modules[
+        "astrbot.core.utils.astrbot_path"
+    ].get_astrbot_data_path = unavailable_data_path
     spec = importlib.util.spec_from_file_location(
         "_configuration_test_plugin", Path(__file__).resolve().parents[1] / "main.py"
     )
