@@ -249,8 +249,6 @@ class JimengProvider(OpenAICompatibleProvider):
                     failures.append(f"第 {index} 个 sessionid：{exc}")
                     if exc.status_code not in (401, 403, 429):
                         raise
-                except ImageGenerationError as exc:
-                    failures.append(f"第 {index} 个 sessionid：{exc}")
         finally:
             self.config.api_key = original
 

@@ -35,6 +35,12 @@
     "obvious_hint": true,
     "default": "尚未测试。开启“保存后测试连通性”并保存，完成后重新打开配置查看结果。"
   },
+  "generation_feedback": {
+    "description": "生成进度与结果提示",
+    "type": "bool",
+    "hint": "开启后在聊天中提示正在生成，完成后显示总耗时、实际尺寸及像素请求不一致的情况。为核验尺寸会下载 URL 图片并使用原有缓存策略发送；核验失败时保留原链接并提示尺寸未能核验。默认关闭。",
+    "default": false
+  },
   "max_count": {
     "description": "单次最多生成数量",
     "type": "int",

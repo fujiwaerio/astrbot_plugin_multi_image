@@ -45,7 +45,7 @@ __all__ = [
     "sniff_mime",
 ]
 
-USER_AGENT = "AstrBot-MultiImage/2.0 (+https://docs.astrbot.app)"
+USER_AGENT = "AstrBot-MultiImage/0.2.1 (+https://docs.astrbot.app)"
 
 #: 出现这些状态码时值得重试（限流、网关抖动、上游超时）。
 RETRY_STATUSES = frozenset({408, 409, 425, 429, 500, 502, 503, 504, 520, 521, 522, 524})
@@ -164,11 +164,13 @@ class HttpRequestFailed(ImageGenerationError):
         status_code: int | None = None,
         response: httpx.Response | None = None,
         cause: BaseException | None = None,
+        request_may_have_succeeded: bool = False,
     ) -> None:
         super().__init__(message)
         self.status_code = status_code
         self.response = response
         self.cause = cause
+        self.request_may_have_succeeded = request_may_have_succeeded
 
     @property
     def is_retryable_by_other_style(self) -> bool:
@@ -178,6 +180,8 @@ class HttpRequestFailed(ImageGenerationError):
         多半是这个中转站没实现该接口。鉴权失败（401/403）与限流（429）
         换风格也没用，直接如实报错。
         """
+        if self.request_may_have_succeeded:
+            return False
         if self.status_code in (404, 405, 501, 505):
             return True
         if self.status_code == 400:
@@ -518,7 +522,7 @@ async def send_request(
     raise_for_status: bool = True,
     **kwargs: Any,
 ) -> httpx.Response:
-    """发送请求，对限流与服务端抖动做指数退避重试。
+    """只读请求可退避重试；提交请求只重试连接前失败或明确限流。
 
     Args:
         client: 复用的 httpx 异步客户端。
@@ -538,6 +542,7 @@ async def send_request(
     @author DeepSeek Harness
     """
     attempts = max(1, int(attempts))
+    read_only = method.upper() in {"GET", "HEAD", "OPTIONS"}
     last_error: HttpRequestFailed | None = None
 
     for attempt in range(1, attempts + 1):
@@ -545,34 +550,55 @@ async def send_request(
         try:
             response = await client.request(method, url, **kwargs)
         except httpx.TimeoutException as exc:
+            uncertain = not read_only and not isinstance(
+                exc, (httpx.ConnectTimeout, httpx.PoolTimeout)
+            )
             last_error = HttpRequestFailed(
-                f"{provider_label} 请求超时（{_safe_url(url)}），可在配置中调大 timeout",
+                f"{provider_label} 请求超时，可在配置中调大此渠道的请求超时"
+                + (_UNCERTAIN_SUBMISSION if uncertain else ""),
                 cause=exc,
+                request_may_have_succeeded=uncertain,
             )
         except httpx.HTTPError as exc:
-            # 有些 httpx 异常的 ``str()`` 是空的（连接被重置之类），
-            # 直接拼进去会得到「网络请求失败（url）：」这种断在半截的消息。
-            reason = str(exc).strip() or type(exc).__name__
+            # 不回显异常原文，避免其中的 URL 或代理凭证进入聊天。
+            uncertain = not read_only and not isinstance(exc, httpx.ConnectError)
             last_error = HttpRequestFailed(
-                f"{provider_label} 网络请求失败（{_safe_url(url)}）：{reason}",
+                f"{provider_label} 网络请求失败：{type(exc).__name__}"
+                + (_UNCERTAIN_SUBMISSION if uncertain else ""),
                 cause=exc,
+                request_may_have_succeeded=uncertain,
             )
         else:
-            if response.is_success:
+            if response.is_success or not raise_for_status:
                 return response
+            uncertain = (
+                not read_only
+                and response.status_code in RETRY_STATUSES
+                and response.status_code != 429
+            )
             last_error = HttpRequestFailed(
-                describe_http_error(response, provider_label),
+                describe_http_error(response, provider_label)
+                + (_UNCERTAIN_SUBMISSION if uncertain else ""),
                 status_code=response.status_code,
                 response=response,
+                request_may_have_succeeded=uncertain,
             )
             if response.status_code not in RETRY_STATUSES:
                 raise last_error
 
+        if last_error.request_may_have_succeeded:
+            raise last_error
         if attempt < attempts:
             await asyncio.sleep(_retry_wait(attempt, response))
 
     assert last_error is not None  # 循环必然赋值，仅用于类型收窄
     raise last_error
+
+
+_UNCERTAIN_SUBMISSION = (
+    "。上游可能已受理本次请求，已停止自动重试或切换协议；"
+    "请先检查上游任务或账单，确认后再手动重试。"
+)
 
 
 def _safe_url(url: str) -> str:

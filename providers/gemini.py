@@ -103,6 +103,7 @@ class GeminiProvider(ImageProvider):
         """按 ``api_style`` 决定尝试顺序。"""
         base = _clean_gemini_base(self.require_api_base())
         model = self.require_model()
+        self.pixel_request = None
         failures: list[str] = []
 
         for style in self.resolve_styles(model):
@@ -110,15 +111,20 @@ class GeminiProvider(ImageProvider):
                 continue
             try:
                 if style == "native":
-                    return await self._generate_native(request, client, base, model)
+                    images = await self._generate_native(request, client, base, model)
+                    return images
                 fallback = self._openai_layer(style)
-                return await fallback.generate(request, client)
+                images = await fallback.generate(request, client)
+                self.pixel_request = fallback.pixel_request
+                return images
             except HttpRequestFailed as exc:
                 failures.append(str(exc))
                 if not exc.is_retryable_by_other_style:
                     raise
             except ImageGenerationError as exc:
-                failures.append(str(exc))
+                raise ImageGenerationError(
+                    f"{exc}；已停止自动切换协议，请先确认上游是否已生成图片。"
+                ) from exc
 
         detail = "；".join(failures[-3:]) if failures else "未知原因"
         raise ImageGenerationError(f"{self.label} 生图失败：{detail}")

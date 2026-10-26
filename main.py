@@ -50,6 +50,11 @@ from astrbot.api.star import Context, Star, StarTools
 from astrbot.core.utils.astrbot_path import get_astrbot_data_path
 
 if __package__:  # 按加载方式选择导入，避免把依赖缺失误判为旧版加载方式。
+    from .generation_feedback import (
+        HEADER_LIMIT,
+        image_dimensions,
+        result_message,
+    )
     from .model_options import ModelOptions
     from .parameter_presets import (
         migrate_configuration,
@@ -62,6 +67,7 @@ if __package__:  # 按加载方式选择导入，避免把依赖缺失误判为�
         GeneratedImage,
         ImageGenerationError,
         ImageGenerationRequest,
+        ImageProvider,
         ProviderConfig,
         ProviderNotConfiguredError,
         ReferenceImage,
@@ -85,9 +91,16 @@ if __package__:  # 按加载方式选择导入，避免把依赖缺失误判为�
         apply_size_options,
         migrate_size_settings,
         prepare_size_schema,
+        supports_native_ratio,
+        validate_effective_size,
         validate_native_size,
     )
 else:  # pragma: no cover - 兼容以独立模块方式进行本地调试。
+    from generation_feedback import (
+        HEADER_LIMIT,
+        image_dimensions,
+        result_message,
+    )
     from model_options import ModelOptions  # type: ignore[no-redef]
     from parameter_presets import (  # type: ignore[no-redef]
         migrate_configuration,
@@ -100,6 +113,7 @@ else:  # pragma: no cover - 兼容以独立模块方式进行本地调试。
         GeneratedImage,
         ImageGenerationError,
         ImageGenerationRequest,
+        ImageProvider,
         ProviderConfig,
         ProviderNotConfiguredError,
         ReferenceImage,
@@ -126,11 +140,13 @@ else:  # pragma: no cover - 兼容以独立模块方式进行本地调试。
         apply_size_options,
         migrate_size_settings,
         prepare_size_schema,
+        supports_native_ratio,
+        validate_effective_size,
         validate_native_size,
     )
 
 PLUGIN_NAME = "astrbot_plugin_multi_image"
-PLUGIN_VERSION = "0.2.0"
+PLUGIN_VERSION = "0.2.1"
 _CONNECTION_RESULT_KEYS = ("connection_test_time", "connection_test_result")
 
 #: 解析参数时用于识别并剥离指令本身。每新增一个指令都要登记到这里，
@@ -721,13 +737,20 @@ class MultiImagePlugin(Star):
             yield event.plain_result("你已有一个生图任务在进行中，请等它完成后再试。")
             return
 
+        started = time.monotonic()
+        feedback = bool(self._global("generation_feedback", False))
         try:
-            # No await occurs between checking quota and accepting the session slot.
-            # Busy requests must not consume a generation attempt.
-            self._rate_limit_retry_after(event)
-            self._cleanup_cache()
             references = await self._collect_references(event, provider_name)
             request = self._build_request(arguments, references)
+            self._prepare_generation(provider_name, arguments, request)
+            self._cleanup_cache()
+            # Reference collection may yield; recheck shared quota before recording it.
+            wait_seconds = self._rate_limit_retry_after(event)
+            if wait_seconds > 0:
+                yield event.plain_result(self._rate_limit_message(wait_seconds))
+                return
+            if feedback:
+                yield event.plain_result("正在生成图片，请稍候……")
             images = await self._generate(provider_name, arguments, request)
 
             if not images:
@@ -740,13 +763,27 @@ class MultiImagePlugin(Star):
                 )
                 return
 
+            dimensions: list[tuple[int, int] | None] = []
             for image in images:
-                yield event.image_result(
-                    await self._resolve_source(provider_name, image)
+                source = await self._resolve_source(
+                    provider_name, image, inspect_dimensions=feedback
+                )
+                if feedback:
+                    dimensions.append(self._source_dimensions(source))
+                yield event.image_result(source)
+            if feedback:
+                yield event.plain_result(
+                    result_message(
+                        dimensions,
+                        images[0].requested_pixels,
+                        time.monotonic() - started,
+                    )
                 )
         except ProviderNotConfiguredError as exc:
             yield event.plain_result(f"渠道未配置完整：{exc}")
         except UnsupportedFeatureError as exc:
+            yield event.plain_result(str(exc))
+        except ValueError as exc:
             yield event.plain_result(str(exc))
         except ImageGenerationError as exc:
             logger.warning("[multi_image] %s 生图失败：%s", provider_name, exc)
@@ -1304,7 +1341,11 @@ class MultiImagePlugin(Star):
         changes = {"width": preset.width, "height": preset.height, "size": preset.size}
         if not (arguments.width or arguments.height) and preset_id != "custom":
             changes["count"] = arguments.count or preset.count
-        if provider_name in {"gemini", "jimeng"} and not arguments.ratio:
+        if (
+            provider_name in {"gemini", "jimeng"}
+            and not arguments.ratio
+            and supports_native_ratio(provider_name, section)
+        ):
             changes["ratio"] = preset.ratio
         if preset.resolution and not arguments.resolution:
             changes["resolution"] = preset.resolution
@@ -1335,6 +1376,26 @@ class MultiImagePlugin(Star):
             references=references,
         )
 
+    def _prepare_generation(
+        self,
+        provider_name: str,
+        arguments: DrawArguments,
+        request: ImageGenerationRequest,
+    ) -> tuple[ProviderConfig, ImageProvider]:
+        """Validate effective command/config parameters without submitting a task."""
+        config = self._build_provider_config(provider_name, arguments)
+        provider = create_provider(provider_name, config)
+        problems = self._config_problems(provider_name, self._section(provider_name))
+        if problems:
+            raise ProviderNotConfiguredError("；".join(problems))
+        # Use the editing model's capabilities when it differs from the text model.
+        effective = dict(
+            self._section(provider_name), model=provider.resolve_model(request)
+        )
+        validate_effective_size(provider_name, effective, arguments, config.options)
+        provider.validate_request(request)
+        return config, provider
+
     async def _generate(
         self,
         provider_name: str,
@@ -1346,12 +1407,7 @@ class MultiImagePlugin(Star):
         所有渠道都经过这里，所以"模型与请求是否匹配"的前置校验也只放在这一处，
         避免每个适配器各写一遍、漏掉某个渠道。
         """
-        config = self._build_provider_config(provider_name, arguments)
-        provider = create_provider(provider_name, config)
-
-        # 例如图像编辑模型（qwen-image-edit-*、*seededit*、*-edit）必须带参考图，
-        # 这里提前失败并给出可操作提示，而不是把上游的英文报错丢给用户。
-        provider.validate_request(request)
+        config, provider = self._prepare_generation(provider_name, arguments, request)
 
         started = time.monotonic()
         logger.info(
@@ -1364,6 +1420,9 @@ class MultiImagePlugin(Star):
 
         async with build_client(config) as client:
             images = await provider.generate(request, client)
+
+        for image in images:
+            image.requested_pixels = provider.pixel_request
 
         logger.info(
             "[multi_image] 渠道=%s 成功生成 %d 张，耗时 %.1fs",
@@ -1467,6 +1526,8 @@ class MultiImagePlugin(Star):
         self,
         provider_name: str,
         image: GeneratedImage,
+        *,
+        inspect_dimensions: bool = False,
     ) -> str:
         """把统一图片结果转成 ``event.image_result`` 能接受的入参。
 
@@ -1476,9 +1537,24 @@ class MultiImagePlugin(Star):
         section = self._section(provider_name)
         force_download = bool(section.get("force_download", False))
 
-        if image.url and not force_download:
+        if image.url and not (force_download or inspect_dimensions):
             return image.url
 
+        if image.url and inspect_dimensions and not force_download:
+            try:
+                return await self._resolve_source_download(provider_name, image)
+            except ImageGenerationError:
+                # Feedback is optional: preserve URL delivery if inspection fails.
+                logger.warning(
+                    "[multi_image] 未能下载图片核验尺寸，保留原图片链接发送。"
+                )
+                return image.url
+        return await self._resolve_source_download(provider_name, image)
+
+    async def _resolve_source_download(
+        self, provider_name: str, image: GeneratedImage
+    ) -> str:
+        """Reuse bounded downloads and credential isolation for delivery/inspection."""
         if image.url:
             config = self._build_provider_config(provider_name, DrawArguments())
             headers = self._download_headers(image.url, config)
@@ -1512,6 +1588,17 @@ class MultiImagePlugin(Star):
                     )
 
         return self._write_cache(image)
+
+    def _source_dimensions(self, source: str) -> tuple[int, int] | None:
+        """Inspect only files written and tracked by this instance, with bounded reads."""
+        path = Path(source)
+        if path not in self._temporary_files:
+            return None
+        try:
+            with path.open("rb") as stream:
+                return image_dimensions(stream.read(HEADER_LIMIT))
+        except OSError:
+            return None
 
     @staticmethod
     def _download_headers(image_url: str, config: ProviderConfig) -> dict[str, str]:

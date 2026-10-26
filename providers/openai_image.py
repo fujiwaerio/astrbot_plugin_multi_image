@@ -41,6 +41,7 @@ from .http import (
     resolve_endpoint,
     send_request,
 )
+from .validation import pixel_dimensions
 
 __all__ = ["GPTProvider", "OpenAICompatibleProvider"]
 
@@ -235,6 +236,7 @@ class OpenAICompatibleProvider(ImageProvider):
         """
         model = self.resolve_model(request)
         base = self.require_api_base()
+        self.pixel_request = None
         failures: list[str] = []
 
         for style in self.resolve_styles(request):
@@ -242,13 +244,16 @@ class OpenAICompatibleProvider(ImageProvider):
             if handler is None:
                 raise ImageGenerationError(f"{self.label} 不支持协议风格：{style}")
             try:
-                return await handler(request, client, base, model)
+                images = await handler(request, client, base, model)
+                return images
             except HttpRequestFailed as exc:
                 failures.append(str(exc))
                 if not exc.is_retryable_by_other_style:
                     raise
             except ImageGenerationError as exc:
-                failures.append(str(exc))
+                raise ImageGenerationError(
+                    f"{exc}；已停止自动切换协议，请先确认上游是否已生成图片。"
+                ) from exc
 
         detail = "；".join(failures[-3:]) if failures else "未知原因"
         raise ImageGenerationError(f"{self.label} 生图失败：{detail}")
@@ -264,7 +269,7 @@ class OpenAICompatibleProvider(ImageProvider):
         if style in ("chat", "chat_completions", "openai_chat"):
             return ["chat"]
         if style in ("images", "image", "openai", "openai_images"):
-            return ["images"]
+            return ["edits"] if request.has_references else ["images"]
         if style in ("edits", "edit", "image_edits"):
             return ["edits"]
 
@@ -324,6 +329,7 @@ class OpenAICompatibleProvider(ImageProvider):
             data=form,
             files=files,
         )
+        self.pixel_request = pixel_dimensions(str(form.get("size") or ""))
         return self._collect(self._decode_json(response), base)
 
     async def _generate_via_chat(
@@ -398,9 +404,12 @@ class OpenAICompatibleProvider(ImageProvider):
                 param = self._param_to_drop(exc, current, dropped)
                 if param is None:
                     raise
+                if param == "size" and self.config.option("native_size_mode"):
+                    raise
                 dropped.append(param)
                 current.pop(param, None)
                 continue
+            self.pixel_request = pixel_dimensions(str(current.get("size") or ""))
             return self._decode_json(response)
 
     @staticmethod
@@ -421,7 +430,7 @@ class OpenAICompatibleProvider(ImageProvider):
         already_dropped: list[str],
     ) -> str | None:
         """根据错误信息判断该丢弃哪个请求参数。"""
-        if exc.status_code not in (400, 422, 500):
+        if exc.request_may_have_succeeded or exc.status_code not in (400, 422):
             return None
         if exc.response is None:
             return None

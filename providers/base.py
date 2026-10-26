@@ -18,6 +18,8 @@ from typing import Any, ClassVar
 
 import httpx
 
+from .validation import request_problem
+
 __all__ = [
     "GeneratedImage",
     "ImageGenerationError",
@@ -294,6 +296,8 @@ class GeneratedImage:
     base64_data: str | None = None
     mime_type: str = "image/png"
     revised_prompt: str = ""
+    requested_pixels: tuple[int, int] | None = None
+    """实际使用的协议发送的像素尺寸；原生档位、比例或未知情况为 None。"""
 
     def __post_init__(self) -> None:
         if not self.url and not self.base64_data:
@@ -373,6 +377,9 @@ class ImageProvider(ABC):
     supports_reference: ClassVar[bool] = False
     """该渠道是否支持图生图 / 垫图。"""
 
+    pixel_request: tuple[int, int] | None = None
+    """最终成功请求体中的明确像素尺寸；比例、原生档位或未知情况为 None。"""
+
     default_api_base: ClassVar[str] = ""
     """官方默认 API 地址，用于配置为空时给出提示或兜底。"""
 
@@ -402,8 +409,7 @@ class ImageProvider(ABC):
     def validate_request(self, request: ImageGenerationRequest) -> None:
         """发请求前的"模型与请求是否匹配"校验。
 
-        目前只拦一类情况：**图像编辑模型（``*image-edit*``、``*seededit*``、
-        ``*-edit``、``*inpaint*``）必须带参考图**。
+        检查已识别模型的像素尺寸、数量、编辑请求格式，以及编辑模型的参考图要求。
 
         这类模型不带参考图时，上游只会返回一句难以理解的英文报错，
         用户根本不知道自己做错了什么。所以在这里提前失败，
@@ -412,6 +418,9 @@ class ImageProvider(ABC):
         @author DeepSeek Harness
         """
         model = (self.resolve_model(request) or "").strip()
+        problem = request_problem(self.config, request, model)
+        if problem:
+            raise UnsupportedFeatureError(problem)
         if not model or not is_edit_model(model) or request.has_references:
             return
         raise UnsupportedFeatureError(self._edit_model_message(model))

@@ -38,6 +38,7 @@ from .http import (
     resolve_endpoint,
     send_request,
 )
+from .validation import pixel_dimensions
 
 __all__ = ["DashScopeProvider", "clean_dashscope_base"]
 
@@ -117,10 +118,12 @@ class DashScopeProvider(ImageProvider):
             except HttpRequestFailed as exc:
                 failures.append(str(exc))
                 # 鉴权、限流类错误换路径也没用。
-                if exc.status_code in (401, 403, 429):
+                if not exc.is_retryable_by_other_style:
                     raise
             except ImageGenerationError as exc:
-                failures.append(str(exc))
+                raise ImageGenerationError(
+                    f"{exc}；已停止自动切换协议，请先确认上游任务状态。"
+                ) from exc
 
         detail = "；".join(failures[-2:]) if failures else "未知原因"
         raise ImageGenerationError(f"{self.label} 生图失败：{detail}")
@@ -223,13 +226,17 @@ class DashScopeProvider(ImageProvider):
     ) -> list[GeneratedImage]:
         """同步多模态生成。"""
         url = resolve_endpoint(base, _MULTIMODAL_PATH, "")
+        payload = self.build_multimodal_payload(request, model)
         response = await send_request(
             client,
             "POST",
             url,
             provider_label=f"{self.label} 生图",
             headers=self._headers(),
-            json=self.build_multimodal_payload(request, model),
+            json=payload,
+        )
+        self.pixel_request = pixel_dimensions(
+            str(payload["parameters"].get("size") or "")
         )
         return await self._collect(response, client, base)
 
@@ -242,6 +249,7 @@ class DashScopeProvider(ImageProvider):
     ) -> list[GeneratedImage]:
         """异步文生图任务：提交后轮询。"""
         url = resolve_endpoint(base, _TEXT2IMAGE_PATH, "")
+        payload = self.build_text2image_payload(request, model)
         response = await send_request(
             client,
             "POST",
@@ -249,7 +257,10 @@ class DashScopeProvider(ImageProvider):
             provider_label=f"{self.label} 提交任务",
             # X-DashScope-Async 是百炼开启异步任务的开关。
             headers=self._headers({"X-DashScope-Async": "enable"}),
-            json=self.build_text2image_payload(request, model),
+            json=payload,
+        )
+        self.pixel_request = pixel_dimensions(
+            str(payload["parameters"].get("size") or "")
         )
         return await self._collect(response, client, base)
 

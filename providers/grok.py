@@ -106,8 +106,12 @@ class GrokProvider(OpenAICompatibleProvider):
             if resolution:
                 payload["resolution"] = resolution
             return payload
-        payload["aspect_ratio"] = self._aspect_ratio(request)
-        payload["resolution"] = self._resolution(request)
+        payload["aspect_ratio"] = self.config.option("ratio") or self._aspect_ratio(
+            request
+        )
+        payload["resolution"] = self.config.option("resolution") or self._resolution(
+            request
+        )
         return payload
 
     def build_payload(
@@ -173,10 +177,18 @@ class GrokProvider(OpenAICompatibleProvider):
             except HttpRequestFailed as exc:
                 failures.append(f"{style}: {exc}")
                 # 鉴权与限流换写法也没用，直接如实报错。
-                if exc.status_code in (401, 403, 429):
+                format_rejected = (
+                    not exc.request_may_have_succeeded
+                    and exc.status_code in (400, 415, 422)
+                    and exc.response is not None
+                    and "multipart" in exc.response.text[:800].lower()
+                )
+                if not (exc.is_retryable_by_other_style or format_rejected):
                     raise
             except ImageGenerationError as exc:
-                failures.append(f"{style}: {exc}")
+                raise ImageGenerationError(
+                    f"{exc}；已停止自动切换请求格式，请先确认上游是否已生成图片。"
+                ) from exc
 
         detail = "；".join(failures[-2:])
         raise ImageGenerationError(f"{self.label} 图生图失败：{detail}")

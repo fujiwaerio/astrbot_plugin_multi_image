@@ -242,6 +242,8 @@ def validate_native_size(name: str, section: dict) -> None:
         )
     if name == "grok" and resolution and resolution not in {"1K", "1.5K", "2K"}:
         raise ValueError("当前 Grok 原生协议不支持所选档位，请重新选择。")
+    if name == "jimeng" and resolution and resolution not in {"1K", "2K", "4K"}:
+        raise ValueError("当前即梦接口不支持所选档位；可用 1K、2K、4K，请重新选择。")
     if (
         name == "seedream"
         and "pro" in str(section.get("model") or "").lower()
@@ -249,6 +251,44 @@ def validate_native_size(name: str, section: dict) -> None:
         and resolution == "4K"
     ):
         raise ValueError("当前 Seedream 模型不支持 4K 档位，请重新选择。")
+
+
+def validate_effective_size(
+    name: str, section: dict, arguments: Any, options: dict
+) -> None:
+    """Validate command overrides as well as saved native settings before submission."""
+    if arguments.ratio and not supports_native_ratio(name, section):
+        raise ValueError("当前渠道或协议不支持独立比例参数，请改用 --size 或手动宽高。")
+    if arguments.resolution and name not in {"gemini", "grok", "jimeng"}:
+        raise ValueError(
+            "当前渠道不支持 --resolution；请在尺寸预设中选择或使用 --size。"
+        )
+    resolution = ""
+    if name in {"gemini", "grok", "jimeng"}:
+        resolution = str(
+            options.get("image_size" if name == "gemini" else "resolution") or ""
+        )
+    if name == "seedream":
+        size = str(options.get("size") or arguments.size or "")
+        if re.fullmatch(r"[\d.]+[kK]", size):
+            resolution = size
+    if not (options.get("native_size_mode") or resolution or arguments.ratio):
+        return
+    effective = dict(
+        section,
+        native_resolution=resolution or "",
+        native_ratio=options.get("ratio") or "",
+    )
+    if options.get("intelligent_ratio"):
+        effective["native_ratio"] = "auto"
+    validate_native_size(name, effective)
+    if (
+        name == "seedream"
+        and resolution
+        and native_tiers(name, section)
+        and resolution.upper() not in native_tiers(name, section)
+    ):
+        raise ValueError("当前 Seedream 模型不支持所选档位，请重新选择常用参数预设。")
 
 
 def apply_size_options(name: str, section: dict, arguments: Any, options: dict) -> None:
@@ -280,8 +320,12 @@ def apply_size_options(name: str, section: dict, arguments: Any, options: dict) 
             options["size"] = resolution
     if arguments.ratio:
         options["ratio"] = arguments.ratio
+        if name == "grok":
+            options["size_mode"] = "aspect_ratio"
     if arguments.resolution:
         options["resolution"] = arguments.resolution
+        if name == "grok":
+            options["size_mode"] = "aspect_ratio"
         if name == "gemini":
             options["image_size"] = arguments.resolution.upper()
     if arguments.size:

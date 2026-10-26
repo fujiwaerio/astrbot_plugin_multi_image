@@ -522,14 +522,14 @@ class GenerationFlowTests(unittest.IsolatedAsyncioTestCase):
             "https://api.example/prefix/v1/images/generations?tenant=example",
         )
 
-    async def test_http_transient_failure_retries_but_stops_after_success(self):
+    async def test_http_rate_limit_retries_but_stops_after_success(self):
         count = 0
 
         def handler(call):
             nonlocal count
             count += 1
             if count == 1:
-                return httpx.Response(503, json={"message": "temporary overload"})
+                return httpx.Response(429, json={"message": "rate limited"})
             return httpx.Response(200, json={"data": [{"url": IMAGE_URL}]})
 
         with patch("providers.http.asyncio.sleep", new=AsyncMock()):
