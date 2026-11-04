@@ -45,7 +45,7 @@ __all__ = [
     "sniff_mime",
 ]
 
-USER_AGENT = "AstrBot-MultiImage/0.2.1 (+https://docs.astrbot.app)"
+USER_AGENT = "AstrBot-MultiImage/0.2.2 (+https://docs.astrbot.app)"
 
 #: 出现这些状态码时值得重试（限流、网关抖动、上游超时）。
 RETRY_STATUSES = frozenset({408, 409, 425, 429, 500, 502, 503, 504, 520, 521, 522, 524})

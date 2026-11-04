@@ -62,6 +62,7 @@ if __package__:  # 按加载方式选择导入，避免把依赖缺失误判为�
         resolve_manual_size,
         resolve_preset,
     )
+    from .prompt_review import prompt_is_blocked
     from .providers import (
         PROVIDER_CLASSES,
         GeneratedImage,
@@ -108,6 +109,7 @@ else:  # pragma: no cover - 兼容以独立模块方式进行本地调试。
         resolve_manual_size,
         resolve_preset,
     )
+    from prompt_review import prompt_is_blocked
     from providers import (  # type: ignore[no-redef]
         PROVIDER_CLASSES,
         GeneratedImage,
@@ -146,7 +148,7 @@ else:  # pragma: no cover - 兼容以独立模块方式进行本地调试。
     )
 
 PLUGIN_NAME = "astrbot_plugin_multi_image"
-PLUGIN_VERSION = "0.2.1"
+PLUGIN_VERSION = "0.2.2"
 _CONNECTION_RESULT_KEYS = ("connection_test_time", "connection_test_result")
 
 #: 解析参数时用于识别并剥离指令本身。每新增一个指令都要登记到这里，
@@ -706,6 +708,12 @@ class MultiImagePlugin(Star):
 
         if not arguments.prompt:
             yield event.plain_result(_USAGE)
+            return
+
+        if prompt_is_blocked(
+            arguments.prompt, self._global("blocked_prompt_keywords", [])
+        ):
+            yield event.plain_result("提示词未通过本地审核，请修改后重试。")
             return
 
         provider_name, workflow = self._resolve_channel(event, arguments)
