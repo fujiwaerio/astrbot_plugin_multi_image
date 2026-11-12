@@ -34,6 +34,7 @@ import contextlib
 import hashlib
 import json
 import re
+import sqlite3
 import time
 import uuid
 from collections.abc import AsyncGenerator
@@ -50,6 +51,7 @@ from astrbot.api.star import Context, Star, StarTools
 from astrbot.core.utils.astrbot_path import get_astrbot_data_path
 
 if __package__:  # 按加载方式选择导入，避免把依赖缺失误判为旧版加载方式。
+    from .configuration_review import review_configuration
     from .generation_feedback import (
         HEADER_LIMIT,
         image_dimensions,
@@ -88,6 +90,7 @@ if __package__:  # 按加载方式选择导入，避免把依赖缺失误判为�
         ensure_mapping,
         sniff_mime,
     )
+    from .providers.validation import request_problem
     from .size_settings import (
         apply_size_options,
         migrate_size_settings,
@@ -96,7 +99,9 @@ if __package__:  # 按加载方式选择导入，避免把依赖缺失误判为�
         validate_effective_size,
         validate_native_size,
     )
+    from .task_history import STATES, TaskHistory, owner_key
 else:  # pragma: no cover - 兼容以独立模块方式进行本地调试。
+    from configuration_review import review_configuration
     from generation_feedback import (
         HEADER_LIMIT,
         image_dimensions,
@@ -138,6 +143,7 @@ else:  # pragma: no cover - 兼容以独立模块方式进行本地调试。
         ensure_mapping,
         sniff_mime,
     )
+    from providers.validation import request_problem
     from size_settings import (
         apply_size_options,
         migrate_size_settings,
@@ -146,9 +152,10 @@ else:  # pragma: no cover - 兼容以独立模块方式进行本地调试。
         validate_effective_size,
         validate_native_size,
     )
+    from task_history import STATES, TaskHistory, owner_key
 
 PLUGIN_NAME = "astrbot_plugin_multi_image"
-PLUGIN_VERSION = "0.2.2"
+PLUGIN_VERSION = "0.2.3"
 _CONNECTION_RESULT_KEYS = ("connection_test_time", "connection_test_result")
 
 #: 解析参数时用于识别并剥离指令本身。每新增一个指令都要登记到这里，
@@ -159,6 +166,8 @@ _COMMAND_WORDS = frozenset(
         "生图",
         "画图",
         "draw_switch",
+        "draw_tasks",
+        "生图任务",
         "生图切换",
         "切换生图",
         "切换渠道",
@@ -497,6 +506,9 @@ class MultiImagePlugin(Star):
         self._connection_test_task: asyncio.Task[None] | None = None
         self._connection_result_save_task: asyncio.Task[None] | None = None
         self._model_refresh_task: asyncio.Task[None] | None = None
+        self._task_history: TaskHistory | None = None
+        self._task_history_unavailable = False
+        self._configuration_review_task: asyncio.Task[None] | None = None
         self._model_options = ModelOptions(
             self.config, lambda name: self._build_provider_config(name, DrawArguments())
         )
@@ -522,6 +534,13 @@ class MultiImagePlugin(Star):
                     "[multi_image] 旧配置已在内存中迁移，保存失败，请重新保存插件配置。"
                 )
         prepare_size_schema(self.config)
+        if (
+            self._configuration_review_task is None
+            or self._configuration_review_task.done()
+        ):
+            self._configuration_review_task = asyncio.create_task(
+                self._review_configuration()
+            )
         if any(
             task and not task.done()
             for task in (self._connection_test_task, self._model_refresh_task)
@@ -609,7 +628,7 @@ class MultiImagePlugin(Star):
         settings = {
             key: value
             for key, value in self.config.items()
-            if key not in _CONNECTION_RESULT_KEYS
+            if key not in (*_CONNECTION_RESULT_KEYS, "configuration_check_result")
         }
         return hashlib.sha256(
             json.dumps(settings, sort_keys=True, ensure_ascii=False).encode("utf-8")
@@ -711,7 +730,9 @@ class MultiImagePlugin(Star):
             return
 
         if prompt_is_blocked(
-            arguments.prompt, self._global("blocked_prompt_keywords", [])
+            arguments.prompt,
+            self._global("blocked_prompt_keywords", []),
+            str(self._global("prompt_match_mode", "contains")),
         ):
             yield event.plain_result("提示词未通过本地审核，请修改后重试。")
             return
@@ -747,6 +768,9 @@ class MultiImagePlugin(Star):
 
         started = time.monotonic()
         feedback = bool(self._global("generation_feedback", False))
+        task_id = ""
+        state = "failed"
+        image_count = 0
         try:
             references = await self._collect_references(event, provider_name)
             request = self._build_request(arguments, references)
@@ -757,11 +781,31 @@ class MultiImagePlugin(Star):
             if wait_seconds > 0:
                 yield event.plain_result(self._rate_limit_message(wait_seconds))
                 return
+            history = self._history()
+            if history is not None and self._event_sender_id(event):
+                try:
+                    config, provider = self._prepare_generation(
+                        provider_name, arguments, request
+                    )
+                    model = provider.resolve_model(request)
+                    if model in (config.api_key, config.api_base, config.proxy):
+                        model = "自定义模型"
+                    task_id = history.start(
+                        self._task_owner(event),
+                        provider_name,
+                        model,
+                    )
+                except (OSError, sqlite3.Error):
+                    logger.warning(
+                        "[multi_image] Task history write unavailable; generation continues."
+                    )
+            state = "generating"
             if feedback:
                 yield event.plain_result("正在生成图片，请稍候……")
             images = await self._generate(provider_name, arguments, request)
 
             if not images:
+                state = "uncertain"
                 # 渠道理论上不会返回空列表（解析层已经会抛错），但万一发生，
                 # 必须给用户一句明确的话，而不是让他对着空气等。
                 logger.warning("[multi_image] 渠道 %s 返回了 0 张图片", provider_name)
@@ -771,6 +815,9 @@ class MultiImagePlugin(Star):
                 )
                 return
 
+            image_count = len(images)
+            state = "preparing_images"
+            self._record_task(task_id, state, started, image_count)
             dimensions: list[tuple[int, int] | None] = []
             for image in images:
                 source = await self._resolve_source(
@@ -779,6 +826,8 @@ class MultiImagePlugin(Star):
                 if feedback:
                     dimensions.append(self._source_dimensions(source))
                 yield event.image_result(source)
+            state = "completed"
+            self._record_task(task_id, state, started, image_count)
             if feedback:
                 yield event.plain_result(
                     result_message(
@@ -788,21 +837,178 @@ class MultiImagePlugin(Star):
                     )
                 )
         except ProviderNotConfiguredError as exc:
+            state = "failed"
             yield event.plain_result(f"渠道未配置完整：{exc}")
         except UnsupportedFeatureError as exc:
+            state = "failed"
             yield event.plain_result(str(exc))
         except ValueError as exc:
+            state = "uncertain" if state == "generating" else "failed"
             yield event.plain_result(str(exc))
         except ImageGenerationError as exc:
+            if state == "generating":
+                state = (
+                    "uncertain"
+                    if not isinstance(exc, HttpRequestFailed)
+                    or exc.request_may_have_succeeded
+                    else "failed"
+                )
+            else:
+                state = "failed"
             logger.warning("[multi_image] %s 生图失败：%s", provider_name, exc)
             yield event.plain_result(f"生图失败：{exc}")
         except Exception as exc:  # noqa: BLE001  # pragma: no cover
+            state = "uncertain" if state == "generating" else "failed"
             # 开发指南要求"不要让插件因一个错误而崩溃"：这里是事件流的最后一道
             # 防线，任何未预期异常都要转成给用户看的文字，而不是中断整个回复。
             logger.exception("[multi_image] 生图发生未预期错误")
             yield event.plain_result(f"生图失败：{type(exc).__name__}: {exc}")
         finally:
+            if state == "generating":
+                state = "uncertain"
+            elif state == "preparing_images":
+                state = "interrupted"
+            self._record_task(task_id, state, started, image_count)
             self._release_slot(event, token)
+
+    def _history(self) -> TaskHistory | None:
+        """Open the optional journal lazily and preserve generation on disk errors."""
+        if (
+            not self._global("task_history_enabled", True)
+            or self._task_history_unavailable
+        ):
+            return None
+        if self._task_history is None:
+            try:
+                self._task_history = TaskHistory(
+                    self._data_directory_path() / "tasks.sqlite3",
+                    self._global("task_history_keep_days", 7),
+                )
+            except (OSError, sqlite3.Error, TypeError, ValueError):
+                self._task_history_unavailable = True
+                logger.warning(
+                    "[multi_image] Task history unavailable; generation continues."
+                )
+        return self._task_history
+
+    def _task_owner(self, event: AstrMessageEvent) -> str:
+        """Bind history access to the caller and current conversation."""
+        platform = (
+            str(getattr(event.platform_meta, "id", ""))
+            if hasattr(event, "platform_meta")
+            else event.get_platform_name()
+        )
+        return owner_key(
+            platform, self._event_group_id(event), self._event_sender_id(event)
+        )
+
+    def _record_task(self, task_id: str, state: str, started: float, images: int):
+        """Update only metadata; never let journal failures block slot release."""
+        if task_id and self._task_history is not None:
+            try:
+                self._task_history.update(
+                    task_id, state, time.monotonic() - started, images
+                )
+            except (OSError, sqlite3.Error):
+                logger.warning("[multi_image] Task history state could not be saved.")
+
+    @filter.command("draw_tasks", alias={"生图任务"})
+    async def draw_tasks(self, event: AstrMessageEvent) -> AsyncGenerator[Any, None]:
+        """Query the caller's local task metadata without contacting upstream."""
+        denied = self._access_denied_reason(event)
+        if denied:
+            yield event.plain_result(denied)
+            return
+        if not self._global("task_history_enabled", True):
+            yield event.plain_result("任务记录已关闭。")
+            return
+        if not self._event_sender_id(event):
+            yield event.plain_result("无法识别当前用户，不能查询任务记录。")
+            return
+        history = self._history()
+        if history is None:
+            yield event.plain_result("任务记录不可用，请检查插件数据目录权限。")
+            return
+        identifier = extract_raw_arguments(event).strip()
+        if identifier and not re.fullmatch(r"[0-9a-f]{32}", identifier):
+            yield event.plain_result(
+                "用法：/draw_tasks [完整任务编号]；不带编号查看当前会话中自己的最近 5 条记录。"
+            )
+            return
+        try:
+            rows = history.query(self._task_owner(event), identifier)
+        except (OSError, sqlite3.Error):
+            yield event.plain_result("任务记录读取失败，请检查数据目录。")
+            return
+        lines = ["当前会话中自己的生图任务："]
+        for row in rows:
+            stamp = (
+                datetime.fromtimestamp(row["created"])
+                .astimezone()
+                .strftime("%m-%d %H:%M:%S %z")
+            )
+            lines.append(
+                f"{row['id']}\n{stamp} · {row['channel']} · {row['model']}\n{STATES[row['state']]} · {row['elapsed']:.1f} 秒 · 返回 {row['images']} 张"
+            )
+        if not rows:
+            lines.append("没有可查询的记录。")
+        yield event.plain_result("\n\n".join(lines))
+
+    def _check_saved_layout(self, name: str) -> list[str]:
+        """Reuse request construction to validate saved layouts without networking."""
+        try:
+            arguments = self._apply_parameter_preset(name, DrawArguments())
+            request = self._build_request(arguments, [])
+            config = self._build_provider_config(name, arguments)
+            provider = create_provider(name, config)
+        except (ValueError, TypeError):
+            return ["手动宽高格式或所选尺寸预设无效，请检查宽:高及模型自适应设置。"]
+        try:
+            validate_effective_size(
+                name, self._section(name), arguments, config.options
+            )
+            if (
+                name == "grok"
+                and config.option("native_size_mode")
+                and config.option("edit_mode") == "multipart"
+            ):
+                return ["原生档位的图生图需要 JSON 格式，请调整图生图请求格式。"]
+        except ValueError:
+            return ["所选原生档位、比例或调用协议不匹配。"]
+        problem = request_problem(config, request, config.model)
+        if problem:
+            return [problem]
+        if name == "comfyui":
+            try:
+                for template in provider.templates():
+                    if not provider._build_workflow(template, request):
+                        return ["工作流内容为空。"]
+            except Exception:  # noqa: BLE001 - Do not echo paths or workflow contents.
+                return ["工作流文件无法读取或内容不是有效 API 格式 JSON。"]
+        return []
+
+    async def _review_configuration(self):
+        """Save fixed local diagnostics in the standard configuration display field."""
+        if "configuration_check_result" not in self.config:
+            return
+        findings = review_configuration(self.config, self._check_saved_layout)
+        text = "本地配置检查（不验证权限、余额或生图能力）：\n" + (
+            "\n".join(findings) if findings else "未发现本地配置问题。"
+        )
+        updates = {"configuration_check_result": text}
+        try:
+            async_save = getattr(self.config, "save_config_async", None)
+            sync_save = getattr(self.config, "save_config", None)
+            if callable(async_save):
+                await async_save(updates)
+            elif callable(sync_save):
+                await asyncio.to_thread(sync_save, updates)
+            else:
+                self.config.update(updates)
+        except Exception:  # noqa: BLE001 - Never expose configuration values.
+            logger.warning(
+                "[multi_image] Local configuration findings could not be saved."
+            )
 
     @filter.command("draw_models", alias={"生图模型", "生图渠道"})
     async def draw_models(
@@ -1934,6 +2140,17 @@ class MultiImagePlugin(Star):
     # ------------------------------------------------------------------ #
     async def terminate(self) -> None:
         """插件卸载 / 重载时清理临时图片与会话占位。"""
+        if self._configuration_review_task is not None:
+            self._configuration_review_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await self._configuration_review_task
+        if self._task_history is not None:
+            try:
+                self._task_history.close()
+            except (OSError, sqlite3.Error):
+                logger.warning(
+                    "[multi_image] Task history recovery state could not be saved."
+                )
         if self._model_refresh_task is not None:
             self._model_refresh_task.cancel()
             with contextlib.suppress(asyncio.CancelledError):

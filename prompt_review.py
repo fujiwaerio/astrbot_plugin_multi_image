@@ -1,5 +1,6 @@
 """Local, literal prompt checks using administrator-configured refusal terms."""
 
+import re
 import unicodedata
 
 
@@ -17,12 +18,13 @@ def _normalized(text: str) -> str:
     return " ".join(text.split())
 
 
-def prompt_is_blocked(prompt: str, keywords: object) -> bool:
+def prompt_is_blocked(prompt: str, keywords: object, mode: str = "contains") -> bool:
     """Check the positive prompt against literal, nonempty refusal terms.
 
     Args:
         prompt: Parsed positive prompt, excluding command options.
         keywords: Standard configuration list; multiline text is also accepted.
+        mode: Contains, exact prompt, or ASCII English word boundaries.
 
     Returns:
         Whether any normalized refusal term occurs in the normalized prompt.
@@ -37,6 +39,18 @@ def prompt_is_blocked(prompt: str, keywords: object) -> bool:
         if not isinstance(keyword, str):
             continue
         keyword = _normalized(keyword)
-        if keyword and keyword in prompt:
+        if not keyword:
+            continue
+        if mode == "exact":
+            matched = keyword == prompt
+        elif mode == "english_word":
+            matched = bool(
+                re.search(
+                    r"(?<![a-z0-9_])" + re.escape(keyword) + r"(?![a-z0-9_])", prompt
+                )
+            )
+        else:
+            matched = keyword in prompt
+        if matched:
             return True
     return False
