@@ -110,7 +110,7 @@ class CommandsAndLimitsTests(unittest.IsolatedAsyncioTestCase):
     async def collect(self, generator):
         return [result async for result in generator]
 
-    async def test_draw_command_end_to_end_for_all_seven_channels(self):
+    async def test_draw_command_end_to_end_for_all_channels(self):
         def handler(call):
             self.assertEqual(call.url.host, "api.example")
             path = call.url.path
@@ -258,6 +258,99 @@ class CommandsAndLimitsTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertIn("已清除", results[0]["text"])
         self.assertEqual(self.plugin._group_channel(FakeEvent()), "")
+
+    async def test_groups_choose_different_comfyui_connections_and_timeout_replies(
+        self,
+    ):
+        settings = self.config["comfyui"]
+        settings.update(
+            api_base="", api_key="unrelated-default-key", timeout=1, max_wait=1
+        )
+        settings["workflows"] = [
+            {
+                "alias": "local",
+                "workflow_json": json.dumps(WORKFLOW),
+                "connection_style": "native",
+                "connection_base": "https://local.example.test",
+            },
+            {
+                "alias": "cloud",
+                "workflow_json": json.dumps(WORKFLOW),
+                "connection_style": "cloud",
+                "connection_key": "mock-cloud-key",
+            },
+        ]
+        local = FakeEvent("/draw_switch comfyui@local", group="local-group")
+        cloud = FakeEvent("/draw_switch comfyui@cloud", group="cloud-group")
+        for event in (local, cloud):
+            switched = await self.collect(self.plugin.draw_switch(event))
+            self.assertIn("已切换", switched[0]["text"])
+            event.text = "/draw paper boat"
+        self.plugin._group_channels = None
+        calls = []
+        job_id = "7f3d2c1b-9a8e-4d6f-b012-3c4d5e6f7a8b"
+
+        def client(config):
+            self.assertIsNone(config.timeout)
+
+            def handler(outgoing):
+                path = outgoing.url.path
+                calls.append(path)
+                if outgoing.url.host == "local.example.test":
+                    self.assertNotIn("authorization", outgoing.headers)
+                    if path == "/prompt":
+                        return httpx.Response(200, json={"prompt_id": "local-id"})
+                    if path == "/history/local-id":
+                        return httpx.Response(
+                            200,
+                            json={
+                                "local-id": {
+                                    "outputs": {
+                                        "8": {"images": [{"filename": "local.png"}]}
+                                    }
+                                }
+                            },
+                        )
+                    self.assertEqual(path, "/view")
+                    return httpx.Response(
+                        200, content=PNG, headers={"content-type": "image/png"}
+                    )
+                self.assertEqual(outgoing.url.host, "cloud.comfy.org")
+                self.assertEqual(
+                    outgoing.headers["authorization"], "Bearer mock-cloud-key"
+                )
+                if path == "/api/v2/jobs":
+                    return httpx.Response(201, json={"id": job_id, "status": "queued"})
+                self.assertEqual(path, f"/api/v2/jobs/{job_id}/cancel")
+                return httpx.Response(200, json={"status": "canceling"})
+
+            return httpx.AsyncClient(transport=httpx.MockTransport(handler))
+
+        with patch.object(self.module, "build_client", client):
+            first = await self.collect(self.plugin.draw(local))
+            with patch("providers.comfyui.GENERATION_DEADLINE_SECONDS", 0.03):
+                second = await self.collect(self.plugin.draw(cloud))
+        self.assertEqual(first[0]["type"], "image")
+        self.assertEqual(len(second), 1)
+        self.assertIn("等待 30 分钟", second[0]["text"])
+        self.assertIn("已受理取消请求", second[0]["text"])
+        self.assertEqual(
+            self.plugin._history().query(self.plugin._task_owner(cloud))[0]["state"],
+            "timed_out",
+        )
+        self.assertFalse(self.plugin._inflight)
+        self.assertEqual(
+            calls,
+            [
+                "/prompt",
+                "/history/local-id",
+                "/view",
+                "/api/v2/jobs",
+                f"/api/v2/jobs/{job_id}/cancel",
+            ],
+        )
+        self.assertEqual(self.plugin._group_channel(local), "comfyui@local")
+        self.assertEqual(self.plugin._group_channel(cloud), "comfyui@cloud")
 
     async def test_switch_rejects_private_unknown_or_unconfigured_targets(self):
         self.config["grok"]["api_key"] = ""

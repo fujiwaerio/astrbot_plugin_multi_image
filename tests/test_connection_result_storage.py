@@ -40,7 +40,7 @@ class ConnectionResultStorageTests(unittest.IsolatedAsyncioTestCase):
             }
         )
 
-    async def test_completed_test_persists_all_seven_results_in_stable_order(self):
+    async def test_completed_test_persists_all_results_in_stable_order(self):
         config = self.config()
         before = copy.deepcopy(config)
         plugin = self.module.MultiImagePlugin(object(), config)
@@ -60,7 +60,7 @@ class ConnectionResultStorageTests(unittest.IsolatedAsyncioTestCase):
             await plugin.terminate()
         self.assertEqual(len(config.snapshots), 1)
         text = config["connection_test_result"]
-        self.assertIn("通过 1 个 · 待确认 1 个 · 失败 1 个 · 跳过 4 个", text)
+        self.assertIn("通过 1 个 · 待确认 1 个 · 失败 1 个 · 跳过 5 个", text)
         self.assertIn("HTTP 200", text)
         self.assertIn("123 ms", text)
         self.assertEqual(

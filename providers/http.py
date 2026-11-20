@@ -45,7 +45,7 @@ __all__ = [
     "sniff_mime",
 ]
 
-USER_AGENT = "AstrBot-MultiImage/0.2.3 (+https://docs.astrbot.app)"
+USER_AGENT = "AstrBot-MultiImage/0.2.4 (+https://docs.astrbot.app)"
 
 #: 出现这些状态码时值得重试（限流、网关抖动、上游超时）。
 RETRY_STATUSES = frozenset({408, 409, 425, 429, 500, 502, 503, 504, 520, 521, 522, 524})
@@ -300,10 +300,10 @@ def build_client(config: ProviderConfig) -> httpx.AsyncClient:
 
     @author DeepSeek Harness
     """
-    timeout = httpx.Timeout(
-        max(5.0, float(config.timeout)),
-        connect=min(30.0, max(5.0, float(config.timeout))),
-    )
+    timeout = None
+    if config.timeout is not None:
+        seconds = max(5.0, float(config.timeout))
+        timeout = httpx.Timeout(seconds, connect=min(30.0, seconds))
     kwargs: dict[str, Any] = {
         "timeout": timeout,
         "follow_redirects": True,

@@ -64,7 +64,16 @@ def parse_manual_dimensions(value: object) -> tuple[int, int]:
 def migrate_manual_dimensions(config: dict) -> bool:
     """Retain old pixel pairs in the single field and clear consumed legacy values."""
     changed = False
-    for name in ("gpt", "gemini", "comfyui", "seedream", "grok", "jimeng", "qwen"):
+    for name in (
+        "gpt",
+        "gemini",
+        "comfyui",
+        "seedream",
+        "grok",
+        "jimeng",
+        "qwen",
+        "minimax",
+    ):
         section = config.get(name)
         if not isinstance(section, dict):
             continue
@@ -94,7 +103,16 @@ def migrate_configuration(config: dict) -> bool:
         config["max_references"] = 0
         config["enable_reference"] = True
         changed = True
-    for name in ("gpt", "gemini", "comfyui", "seedream", "grok", "jimeng", "qwen"):
+    for name in (
+        "gpt",
+        "gemini",
+        "comfyui",
+        "seedream",
+        "grok",
+        "jimeng",
+        "qwen",
+        "minimax",
+    ):
         section = config.get(name)
         if isinstance(section, dict) and section.get("parameter_preset") == "":
             section["parameter_preset"] = "custom"

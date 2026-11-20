@@ -165,7 +165,7 @@ class SubmissionSafetyTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(response.status_code, 200)
                 self.assertEqual(len(calls), 2)
 
-    async def test_all_seven_adapters_stop_after_uncertain_submission(self):
+    async def test_all_adapters_stop_after_uncertain_submission(self):
         for name in supported_providers():
             calls = []
 

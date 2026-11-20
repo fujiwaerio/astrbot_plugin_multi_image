@@ -62,7 +62,7 @@ class GenerationFlowTests(unittest.IsolatedAsyncioTestCase):
             images = await provider.generate(request, client)
         return images, calls
 
-    async def test_all_seven_channels_complete_text_and_reference_generation(self):
+    async def test_original_channels_complete_text_and_reference_generation(self):
         styles = {
             "gpt": "images",
             "gemini": "native",
@@ -71,6 +71,8 @@ class GenerationFlowTests(unittest.IsolatedAsyncioTestCase):
             "qwen": "multimodal",
         }
         for name in supported_providers():
+            if name == "minimax":
+                continue  # Its two native and relay contracts have dedicated fixtures.
             for reference in (False, True):
                 with self.subTest(provider=name, reference=reference):
                     request = ImageGenerationRequest(

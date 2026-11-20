@@ -17,7 +17,16 @@ def review_configuration(
     Returns:
         Fixed local findings that never echo configuration values.
     """
-    channels = ("gpt", "gemini", "comfyui", "seedream", "grok", "jimeng", "qwen")
+    channels = (
+        "gpt",
+        "gemini",
+        "comfyui",
+        "seedream",
+        "grok",
+        "jimeng",
+        "qwen",
+        "minimax",
+    )
     findings = []
     default = config.get("default_provider", "gpt")
     if default not in channels:
@@ -39,31 +48,33 @@ def review_configuration(
         if not isinstance(section, dict):
             findings.append(f"{name}：渠道配置结构无效。")
             continue
-        configured = (
-            bool(section.get("api_key"))
-            if name != "comfyui"
-            else bool(section.get("api_base") or section.get("workflows"))
+        configured = bool(section.get("api_key")) or (
+            name == "comfyui"
+            and bool(section.get("api_base") or section.get("workflows"))
         )
         if not configured:
             if default == name:
                 findings.append(f"{name}：默认渠道尚未配置凭据或工作流。")
             continue
-        if not section.get("api_base") or (
-            name != "comfyui" and not section.get("model")
-        ):
-            findings.append(f"{name}：缺少 API 地址或模型名称。")
-        try:
-            url = urlsplit(str(section.get("api_base") or ""))
-            if url.scheme not in {"http", "https"} or not url.hostname or url.port == 0:
-                raise ValueError
-        except ValueError:
-            findings.append(f"{name}：API 地址格式无效，请填写 HTTP(S) 地址。")
-        try:
-            timeout = float(section.get("timeout", 60 if name == "comfyui" else 180))
-            if not math.isfinite(timeout) or timeout <= 0:
-                raise ValueError
-        except (TypeError, ValueError, OverflowError):
-            findings.append(f"{name}：请求超时应为大于 0 的有限数值。")
+        if name != "comfyui":
+            if not section.get("api_base") or not section.get("model"):
+                findings.append(f"{name}：缺少 API 地址或模型名称。")
+            try:
+                url = urlsplit(str(section.get("api_base") or ""))
+                if (
+                    url.scheme not in {"http", "https"}
+                    or not url.hostname
+                    or url.port == 0
+                ):
+                    raise ValueError
+            except ValueError:
+                findings.append(f"{name}：API 地址格式无效，请填写 HTTP(S) 地址。")
+            try:
+                timeout = float(section.get("timeout", 180))
+                if not math.isfinite(timeout) or timeout <= 0:
+                    raise ValueError
+            except (TypeError, ValueError, OverflowError):
+                findings.append(f"{name}：请求超时应为大于 0 的有限数值。")
         if name == "comfyui":
             workflows = section.get("workflows", [])
             if not isinstance(workflows, list) or not workflows:

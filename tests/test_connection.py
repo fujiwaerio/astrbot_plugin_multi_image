@@ -43,8 +43,17 @@ class ConnectionTests(unittest.IsolatedAsyncioTestCase):
             result = await connection.test_connection(config)
         return result, requests
 
-    async def test_all_seven_channels_only_send_get(self):
-        for name in ("gpt", "gemini", "comfyui", "seedream", "grok", "jimeng", "qwen"):
+    async def test_all_channels_only_send_get(self):
+        for name in (
+            "gpt",
+            "gemini",
+            "comfyui",
+            "seedream",
+            "grok",
+            "jimeng",
+            "qwen",
+            "minimax",
+        ):
             with self.subTest(name=name):
                 data = (
                     {"system": {}, "devices": []}

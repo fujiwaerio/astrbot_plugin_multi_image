@@ -124,7 +124,11 @@ class PluginConfigurationTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("force_download", schema)
         for name in self.module.supported_providers():
             fields = schema[name]["items"]
-            self.assertIn("timeout", fields)
+            if name == "comfyui":
+                self.assertNotIn("timeout", fields)
+                self.assertNotIn("max_wait", fields)
+            else:
+                self.assertIn("timeout", fields)
             self.assertIn("force_download", fields)
             self.assertIn("parameter_preset", fields)
 

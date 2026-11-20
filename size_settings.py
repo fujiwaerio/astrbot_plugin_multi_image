@@ -20,7 +20,7 @@ else:
         resolve_preset,
     )
 
-CHANNELS = ("gpt", "gemini", "comfyui", "seedream", "grok", "jimeng", "qwen")
+CHANNELS = ("gpt", "gemini", "comfyui", "seedream", "grok", "jimeng", "qwen", "minimax")
 RATIOS = ("", "1:1", "4:3", "3:4", "16:9", "9:16", "3:2", "2:3", "21:9")
 
 
@@ -28,6 +28,12 @@ def native_tiers(name: str, section: dict) -> tuple[str, ...]:
     """Offer only documented tiers for recognized model/protocol combinations."""
     model = str(section.get("model") or "").lower().rsplit("/", 1)[-1]
     style = str(section.get("api_style") or "auto").lower()
+    if (
+        name == "minimax"
+        and style in {"auto", "native", "h3"}
+        and model not in {"image-01", "image-01-live"}
+    ):
+        return "1K", "2K", "4K"
     if name == "seedream":
         if "seedream-5" in model and "pro" in model:
             return ("2K",)
@@ -63,6 +69,8 @@ def supports_native_ratio(name: str, section: dict) -> bool:
     style = str(section.get("api_style") or "auto").lower()
     if name == "gemini":
         return style in {"auto", "native", "gemini", "google"}
+    if name == "minimax":
+        return style in {"auto", "native", "h3", "legacy"}
     return name in {"jimeng", "grok"} and style not in {"chat", "chat_completions"}
 
 
@@ -226,6 +234,8 @@ def validate_native_size(name: str, section: dict) -> None:
         raise ValueError("模型自适应模式需要 Gemini 原生协议，请检查调用协议。")
     if name in {"grok", "jimeng"} and style in {"chat", "chat_completions"}:
         raise ValueError("当前对话协议不支持原生尺寸档位，请选择图片协议或像素预设。")
+    if name == "minimax":
+        return  # MiniMaxProvider checks the effective protocol and model.
     allowed_ratios = (*RATIOS, "auto") if name == "jimeng" else RATIOS
     if ratio and (
         ratio not in allowed_ratios or not supports_native_ratio(name, section)
@@ -257,6 +267,11 @@ def validate_effective_size(
     name: str, section: dict, arguments: Any, options: dict
 ) -> None:
     """Validate command overrides as well as saved native settings before submission."""
+    if name == "minimax":
+        # The adapter validates the selected protocol and model.
+        if options.get("native_size_mode") and not supports_native_ratio(name, section):
+            raise ValueError("MiniMax 中转协议请选择场景预设或手动宽高。")
+        return
     if arguments.ratio and not supports_native_ratio(name, section):
         raise ValueError("当前渠道或协议不支持独立比例参数，请改用 --size 或手动宽高。")
     if arguments.resolution and name not in {"gemini", "grok", "jimeng"}:
@@ -306,6 +321,8 @@ def apply_size_options(name: str, section: dict, arguments: Any, options: dict) 
         if name == "gemini":
             options["image_size"] = resolution.upper()
             options["ratio"] = ratio
+        elif name == "minimax":
+            options.update(resolution=resolution.upper(), ratio=ratio)
         elif name == "grok":
             options.update(
                 size_mode="aspect_ratio", resolution=resolution.lower(), ratio=ratio

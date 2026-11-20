@@ -23,11 +23,11 @@ from __future__ import annotations
 import asyncio
 import json
 import re
-import time
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
 
 import httpx
 
@@ -36,12 +36,18 @@ from .base import (
     ImageGenerationError,
     ImageGenerationRequest,
     ImageProvider,
+    ProviderConfig,
+    ReferenceImage,
+    UnsupportedFeatureError,
 )
+from .comfyui_remote import HostedComfyUI, connection_root, runninghub_workflow_id
 from .http import (
     HttpRequestFailed,
     auth_headers,
     download_image,
+    ensure_mapping,
     json_headers,
+    resolve_endpoint,
     send_request,
 )
 
@@ -74,8 +80,18 @@ _SAMPLER_NODE_TYPES = (
 #: 参考图输入节点类型。
 _LOAD_IMAGE_NODE_TYPES = ("LoadImage", "LoadImageMask", "ImageLoad")
 
-#: 轮询时连续多少次拿不到 JSON 就判定这条链路不通（避免白等满 max_wait）。
+#: 轮询时连续多少次拿不到 JSON 就判定这条链路不通。
 _MAX_BLANK_POLLS = 3
+GENERATION_DEADLINE_SECONDS = 30 * 60
+_CANCEL_REQUEST_SECONDS = 5
+
+
+class ComfyUITimeoutError(ImageGenerationError):
+    """No usable image arrived before the workflow deadline."""
+
+    def __init__(self, detail: str):
+        super().__init__(f"ComfyUI 等待 30 分钟仍未取得图片，本次等待已停止。{detail}")
+
 
 #: 工作流文本里支持的占位符。
 _PLACEHOLDER_RE = re.compile(r"\{\{\s*(\w+)\s*\}\}")
@@ -100,6 +116,14 @@ class WorkflowTemplate:
     latent_node: str = ""
     seed_node: str = ""
     image_node: str = ""
+    reference_nodes: tuple[str, ...] = ()
+    output_nodes: tuple[str, ...] = ()
+    runninghub_id: str = ""
+    connection_style: str = "inherit"
+    connection_base: str = field(default="", repr=False)
+    connection_key: str = field(default="", repr=False)
+    connection_region: str = "cn"
+    connection_headers: dict[str, str] = field(default_factory=dict, repr=False)
 
     @classmethod
     def from_config(cls, item: dict[str, Any], index: int) -> WorkflowTemplate:
@@ -116,6 +140,32 @@ class WorkflowTemplate:
             latent_node=str(item.get("latent_node") or "").strip(),
             seed_node=str(item.get("seed_node") or "").strip(),
             image_node=str(item.get("image_node") or "").strip(),
+            reference_nodes=_node_ids(item.get("reference_nodes")),
+            output_nodes=_node_ids(item.get("output_nodes")),
+            runninghub_id=str(item.get("runninghub_id") or "").strip(),
+            connection_style=str(item.get("connection_style") or "inherit")
+            .strip()
+            .lower(),
+            connection_base=str(item.get("connection_base") or "").strip(),
+            connection_key=str(item.get("connection_key") or "").strip(),
+            connection_region=str(item.get("connection_region") or "cn"),
+            connection_headers={
+                str(key): str(value)
+                for key, value in ensure_mapping(item.get("connection_headers")).items()
+            },
+        )
+
+    def bind_connection(self, config: ProviderConfig) -> ProviderConfig:
+        """Use either all channel credentials or the selected template's own credentials."""
+        if self.connection_style == "inherit":
+            return config
+        return replace(
+            config,
+            api_style=self.connection_style,
+            api_base=self.connection_base,
+            api_key=self.connection_key,
+            extra_headers=self.connection_headers,
+            options={**config.options, "runninghub_region": self.connection_region},
         )
 
     def load_text(self) -> str:
@@ -137,6 +187,15 @@ class WorkflowTemplate:
             raise ImageGenerationError(
                 f"ComfyUI 工作流「{self.alias}」读取失败：{exc}"
             ) from exc
+
+
+def _node_ids(raw: Any) -> tuple[str, ...]:
+    """Read node IDs from AstrBot list entries or a manually edited string."""
+    if isinstance(raw, str):
+        raw = re.split(r"[,，\s]+", raw.strip())
+    if not isinstance(raw, (list, tuple)):
+        return ()
+    return tuple(str(item).strip() for item in raw if str(item).strip())
 
 
 def parse_workflow_templates(raw: Any) -> list[WorkflowTemplate]:
@@ -183,12 +242,39 @@ class ComfyUIProvider(ImageProvider):
     #: ComfyUI 没有模型名的概念，这里留空以避免基类的模型校验被触发。
     default_model = "workflow"
 
+    def __init__(self, config: ProviderConfig) -> None:
+        super().__init__(config)
+        if self.templates():
+            try:
+                template = self.select_template(config.option("workflow_alias", ""))
+            except ImageGenerationError:
+                return  # The requesting command or configuration check reports the invalid alias.
+            self.config = template.bind_connection(config)
+
     # ------------------------------------------------------------------ #
     # 模板管理
     # ------------------------------------------------------------------ #
     def templates(self) -> list[WorkflowTemplate]:
         """读取配置里的全部工作流模板。"""
         return parse_workflow_templates(self.config.option("workflows", []))
+
+    def connection_root(self) -> str:
+        return connection_root(
+            self.config.api_style,
+            self.config.api_base,
+            self.config.api_key,
+            str(self.config.option("runninghub_region", "cn") or "cn"),
+        )
+
+    def validate_request(self, request: ImageGenerationRequest) -> None:
+        super().validate_request(request)
+        self.validate_connection()
+
+    def validate_connection(self) -> None:
+        template = self.select_template(self.config.option("workflow_alias", ""))
+        self.connection_root()
+        if self.config.api_style.strip().lower() == "runninghub":
+            runninghub_workflow_id(template.runninghub_id)
 
     def template_aliases(self) -> list[str]:
         """返回全部模板别名，供帮助信息使用。"""
@@ -223,18 +309,143 @@ class ComfyUIProvider(ImageProvider):
         client: httpx.AsyncClient,
     ) -> list[GeneratedImage]:
         """提交工作流、轮询结果、取回图片。"""
-        base = self.require_api_base().rstrip("/")
+        base = self.connection_root()
         alias = str(self.config.option("workflow_alias", "") or "")
         template = self.select_template(alias)
+        style = self.config.api_style.strip().lower()
+        workflow_id = (
+            runninghub_workflow_id(template.runninghub_id)
+            if style == "runninghub"
+            else ""
+        )
+        hosted = (
+            HostedComfyUI(self.config, base, client)
+            if style in {"cloud", "runninghub"}
+            else None
+        )
 
         workflow = self._build_workflow(template, request)
-        uploaded = await self._upload_references(client, base, request)
-        if uploaded:
-            self._apply_reference(workflow, template, uploaded[0])
+        if hosted and any(
+            not isinstance(node, dict)
+            or not isinstance(node.get("class_type"), str)
+            or not isinstance(node.get("inputs"), dict)
+            for node in workflow.values()
+        ):
+            raise UnsupportedFeatureError(
+                "ComfyUI 云端连接需要按 API 格式导出的工作流。"
+            )
+        prompt_id = ""
+        submitting = False
+        deadline = asyncio.timeout(GENERATION_DEADLINE_SECONDS)
+        try:
+            async with deadline:
+                await self._bind_references(
+                    client, base, template, request, workflow, hosted
+                )
+                submitting = True
+                if hosted:
+                    prompt_id, job = await hosted.submit(workflow, workflow_id)
+                    return await hosted.results(prompt_id, job, template.output_nodes)
+                prompt_id = await self._submit(client, base, workflow)
+                history = await self._wait_for_result(client, base, prompt_id)
+                return await self._download_outputs(
+                    client, base, history, template.output_nodes
+                )
+        except TimeoutError:
+            if not deadline.expired():
+                raise
+            detail = await self._stop_expired_job(
+                client, base, prompt_id, hosted, submitting
+            )
+            raise ComfyUITimeoutError(detail) from None
 
-        prompt_id = await self._submit(client, base, workflow)
-        history = await self._wait_for_result(client, base, prompt_id)
-        return await self._download_outputs(client, base, history)
+    async def _bind_references(
+        self,
+        client: httpx.AsyncClient,
+        base: str,
+        template: WorkflowTemplate,
+        request: ImageGenerationRequest,
+        workflow: dict[str, Any],
+        hosted: HostedComfyUI | None,
+    ) -> None:
+        if request.references:
+            targets = template.reference_nodes
+            if targets and len(request.references) > len(targets):
+                raise UnsupportedFeatureError(
+                    f"ComfyUI 当前工作流只配置了 {len(targets)} 个参考图输入，请减少参考图数量。"
+                )
+            if not targets:
+                node = template.image_node or self._find_node(
+                    workflow, _LOAD_IMAGE_NODE_TYPES
+                )
+                image_node = workflow.get(node)
+                if not isinstance(image_node, dict) or not isinstance(
+                    image_node.get("inputs"), dict
+                ):
+                    raise ImageGenerationError(
+                        "ComfyUI 工作流缺少可用的图片输入节点，请检查节点 ID。"
+                    )
+                targets = (node,)
+            references = request.references[: len(targets)]
+            if hosted and any(not reference.has_bytes for reference in references):
+                raise UnsupportedFeatureError(
+                    "ComfyUI 云端连接需要可读取的参考图文件。"
+                )
+            uploaded = await self._upload_references(
+                client, base, references, hosted=hosted
+            )
+            for node_id, filename in zip(targets, uploaded, strict=False):
+                self._set_input(workflow, node_id, ("image",), filename)
+
+    async def _stop_expired_job(
+        self,
+        client: httpx.AsyncClient,
+        base: str,
+        prompt_id: str,
+        hosted: HostedComfyUI | None,
+        submitting: bool,
+    ) -> str:
+        if not submitting:
+            return "工作流尚未提交。"
+        if not prompt_id:
+            return "未取得上游任务 ID，无法确认取消，请检查服务端任务。"
+        try:
+            async with asyncio.timeout(_CANCEL_REQUEST_SECONDS):
+                if hosted:
+                    canceled = await hosted.cancel(prompt_id)
+                else:
+                    canceled = await self._cancel_native(client, base, prompt_id)
+        except (TimeoutError, ImageGenerationError, httpx.RequestError):
+            canceled = False
+        if canceled:
+            return "上游已受理取消请求，或已报告该任务结束。"
+        return "未能确认上游取消，请检查服务端任务。"
+
+    async def _cancel_native(
+        self, client: httpx.AsyncClient, base: str, prompt_id: str
+    ) -> bool:
+        prefix = "" if urlsplit(base).path.endswith("/api") else "/api"
+        response = await client.post(
+            resolve_endpoint(base, f"{prefix}/jobs/{prompt_id}/cancel", ""),
+            headers=self._auth_headers(),
+            follow_redirects=False,
+        )
+        if response.status_code in {404, 405, 501}:
+            # Older servers can remove a pending job by ID. A 200 does not prove it stopped.
+            await client.post(
+                resolve_endpoint(base, "/queue", ""),
+                headers=json_headers(self.config),
+                json={"delete": [prompt_id]},
+                follow_redirects=False,
+            )
+            return False
+        if not response.is_success:
+            return False
+        try:
+            result = response.json()
+        except ValueError:
+            return False
+        return isinstance(result, dict) and isinstance(result.get("cancelled"), bool)
 
     # ------------------------------------------------------------------ #
     # 工作流构造
@@ -266,6 +477,25 @@ class ComfyUIProvider(ImageProvider):
 
         if not uses_placeholders:
             self._inject_nodes(workflow, template, request, seed)
+
+        for node_ids, label in (
+            (template.reference_nodes, "参考图输入"),
+            (template.output_nodes, "图片输出"),
+        ):
+            if len(set(node_ids)) != len(node_ids):
+                raise ImageGenerationError(f"ComfyUI {label}节点 ID 重复。")
+            if any(not isinstance(workflow.get(node_id), dict) for node_id in node_ids):
+                raise ImageGenerationError(f"ComfyUI {label}节点 ID 不存在。")
+        for node_id in template.reference_nodes:
+            inputs = workflow[node_id].get("inputs")
+            if (
+                not isinstance(inputs, dict)
+                or "image" not in inputs
+                or not isinstance(inputs["image"], str)
+            ):
+                raise ImageGenerationError(
+                    "ComfyUI 参考图节点须具有可写入文件名的 image 输入。"
+                )
 
         return workflow
 
@@ -404,22 +634,6 @@ class ComfyUIProvider(ImageProvider):
         inputs[keys[0]] = value
         return True
 
-    def _apply_reference(
-        self,
-        workflow: dict[str, Any],
-        template: WorkflowTemplate,
-        uploaded_name: str,
-    ) -> None:
-        """把上传后的参考图文件名写进 LoadImage 节点。"""
-        node_id = template.image_node or self._find_node(
-            workflow, _LOAD_IMAGE_NODE_TYPES
-        )
-        if not node_id:
-            raise ImageGenerationError(
-                "ComfyUI 工作流里找不到图片输入节点（LoadImage），请在模板中填写「图片输入节点 id」"
-            )
-        self._set_input(workflow, node_id, ("image",), uploaded_name)
-
     # ------------------------------------------------------------------ #
     # HTTP 交互
     # ------------------------------------------------------------------ #
@@ -427,25 +641,33 @@ class ComfyUIProvider(ImageProvider):
         self,
         client: httpx.AsyncClient,
         base: str,
-        request: ImageGenerationRequest,
-    ) -> list[str]:
+        references: list[ReferenceImage],
+        *,
+        hosted: HostedComfyUI | None = None,
+    ) -> list[str | dict]:
         """把参考图上传到 ComfyUI 的 input 目录。"""
-        names: list[str] = []
-        for index, reference in enumerate(request.references):
+        names: list[str | dict] = []
+        upload_id = uuid.uuid4().hex
+        for index, reference in enumerate(references):
+            suffix = Path(reference.filename).suffix
+            if not re.fullmatch(r"\.[a-zA-Z0-9]{1,8}", suffix):
+                suffix = ".png"
+            file = (
+                f"astrbot_{upload_id}_{index + 1}{suffix}",
+                reference.data,
+                reference.mime_type or "image/png",
+            )
+            if hosted:
+                names.append(await hosted.upload(file))
+                continue
             response = await send_request(
                 client,
                 "POST",
-                f"{base}/upload/image",
+                resolve_endpoint(base, "/upload/image", ""),
                 provider_label=f"{self.label} 上传参考图",
                 headers=self._auth_headers(),
-                data={"overwrite": "true", "type": "input"},
-                files={
-                    "image": (
-                        reference.filename or f"reference_{index}.png",
-                        reference.data,
-                        reference.mime_type or "image/png",
-                    )
-                },
+                data={"overwrite": "false", "type": "input"},
+                files={"image": file},
             )
             try:
                 payload = response.json()
@@ -471,7 +693,7 @@ class ComfyUIProvider(ImageProvider):
         response = await send_request(
             client,
             "POST",
-            f"{base}/prompt",
+            resolve_endpoint(base, "/prompt", ""),
             provider_label=f"{self.label} 提交工作流",
             headers=json_headers(self.config),
             json={"prompt": workflow, "client_id": client_id},
@@ -488,8 +710,8 @@ class ComfyUIProvider(ImageProvider):
             )
 
         prompt_id = str(payload.get("prompt_id") or "")
-        if not prompt_id:
-            raise ImageGenerationError(f"ComfyUI 未返回 prompt_id：{payload}")
+        if not re.fullmatch(r"[A-Za-z0-9_-]{1,128}", prompt_id):
+            raise ImageGenerationError("ComfyUI 未返回有效的任务 ID")
         return prompt_id
 
     async def _wait_for_result(
@@ -498,11 +720,8 @@ class ComfyUIProvider(ImageProvider):
         base: str,
         prompt_id: str,
     ) -> dict[str, Any]:
-        """轮询 ``/history/{prompt_id}`` 直到任务完成或超时。"""
+        """Poll until the expected result arrives or the workflow deadline cancels polling."""
         interval = max(0.2, float(self.config.option("poll_interval", 1.0)))
-        deadline = time.monotonic() + max(
-            1.0, float(self.config.option("max_wait", 300.0))
-        )
         blank_polls = 0
 
         while True:
@@ -510,7 +729,7 @@ class ComfyUIProvider(ImageProvider):
                 response = await send_request(
                     client,
                     "GET",
-                    f"{base}/history/{prompt_id}",
+                    resolve_endpoint(base, f"/history/{prompt_id}", ""),
                     provider_label=f"{self.label} 查询任务",
                     headers=self._auth_headers(),
                     attempts=2,
@@ -527,7 +746,7 @@ class ComfyUIProvider(ImageProvider):
                     payload = response.json()
                 except (ValueError, TypeError):
                     # 反代/网关把接口挡下来时会返回 HTML。偶发一次可以继续等，
-                    # 但一直不是 JSON 就说明这条链路根本不通——不能白等满 max_wait。
+                    # 连续非 JSON 响应表明接口地址或代理配置有误。
                     blank_polls += 1
                     if blank_polls >= _MAX_BLANK_POLLS:
                         preview = " ".join((response.text or "").split())[:80]
@@ -548,12 +767,6 @@ class ComfyUIProvider(ImageProvider):
                     if entry.get("outputs"):
                         return entry
 
-            if time.monotonic() >= deadline:
-                raise ImageGenerationError(
-                    f"ComfyUI 任务 {prompt_id} 等待超时"
-                    f"（{int(self.config.option('max_wait', 300))} 秒），"
-                    "可调大「最长等待时间」或检查工作流是否卡住"
-                )
             await asyncio.sleep(interval)
 
     async def _download_outputs(
@@ -561,13 +774,14 @@ class ComfyUIProvider(ImageProvider):
         client: httpx.AsyncClient,
         base: str,
         history: dict[str, Any],
+        selected_nodes: tuple[str, ...] = (),
     ) -> list[GeneratedImage]:
         """遍历 outputs，把每张输出图片取回来转成 Base64。"""
         outputs = history.get("outputs") or {}
         images: list[GeneratedImage] = []
 
-        for node_id in sorted(outputs, key=self._node_sort_key):
-            node_output = outputs[node_id]
+        for node_id in selected_nodes or sorted(outputs, key=self._node_sort_key):
+            node_output = outputs.get(node_id)
             if not isinstance(node_output, dict):
                 continue
             for item in self._iter_media(node_output):
@@ -605,7 +819,7 @@ class ComfyUIProvider(ImageProvider):
             raise ImageGenerationError("ComfyUI 输出里缺少 filename")
         return await download_image(
             client,
-            f"{base}/view",
+            resolve_endpoint(base, "/view", ""),
             provider_label=f"{self.label} 下载图片",
             headers=self._auth_headers(),
             params={

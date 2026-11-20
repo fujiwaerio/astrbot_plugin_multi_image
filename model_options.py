@@ -14,7 +14,7 @@ else:
     from providers.base import ProviderConfig
     from providers.connection import ModelListResult, list_models
 
-MODEL_PICKER_PROVIDERS = ("gpt", "gemini", "seedream", "grok", "jimeng")
+MODEL_PICKER_PROVIDERS = ("gpt", "gemini", "seedream", "grok", "jimeng", "minimax")
 
 
 class ModelOptions:

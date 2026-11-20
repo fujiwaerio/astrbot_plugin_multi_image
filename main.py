@@ -1,6 +1,6 @@
 """AstrBot 统一多模型生图插件。
 
-一个指令打通七个生图渠道，并且让 NewAPI / OneAPI 这类**中转站**也能正常用：
+一个指令打通八个生图渠道，并且让 NewAPI / OneAPI 这类**中转站**也能正常用：
 
 ===========  ============================================================
 渠道          说明
@@ -80,7 +80,7 @@ if __package__:  # 按加载方式选择导入，避免把依赖缺失误判为�
         strip_data_uri,
         supported_providers,
     )
-    from .providers.comfyui import parse_workflow_templates
+    from .providers.comfyui import ComfyUITimeoutError, parse_workflow_templates
     from .providers.connection import ConnectionResult, test_connection
     from .providers.http import (
         HttpRequestFailed,
@@ -130,7 +130,10 @@ else:  # pragma: no cover - 兼容以独立模块方式进行本地调试。
         strip_data_uri,
         supported_providers,
     )
-    from providers.comfyui import parse_workflow_templates  # type: ignore[no-redef]
+    from providers.comfyui import (  # type: ignore[no-redef]
+        ComfyUITimeoutError,
+        parse_workflow_templates,
+    )
     from providers.connection import (  # type: ignore[no-redef]
         ConnectionResult,
         test_connection,
@@ -155,7 +158,7 @@ else:  # pragma: no cover - 兼容以独立模块方式进行本地调试。
     from task_history import STATES, TaskHistory, owner_key
 
 PLUGIN_NAME = "astrbot_plugin_multi_image"
-PLUGIN_VERSION = "0.2.3"
+PLUGIN_VERSION = "0.2.4"
 _CONNECTION_RESULT_KEYS = ("connection_test_time", "connection_test_result")
 
 #: 解析参数时用于识别并剥离指令本身。每新增一个指令都要登记到这里，
@@ -212,10 +215,11 @@ _PROVIDER_OPTION_KEYS: dict[str, tuple[str, ...]] = {
         "workflows",
         "default_workflow",
         "poll_interval",
-        "max_wait",
         "client_id",
+        "runninghub_region",
     ),
     "seedream": ("watermark", "optimize_prompt"),
+    "minimax": ("disable_prompt_enhanced", "prompt_optimizer"),
     "grok": ("edit_model", "size_mode", "edit_mode"),
     "jimeng": (
         "sample_strength",
@@ -225,7 +229,7 @@ _PROVIDER_OPTION_KEYS: dict[str, tuple[str, ...]] = {
 }
 
 #: 渠道状态常量。刻意区分"没配"和"配坏了"：
-#: 前者是正常状态（七个渠道并列，配一个就够），后者才需要用户处理。
+#: 前者是正常状态（八个渠道并列，配一个就够），后者才需要用户处理。
 _STATE_READY = "ready"
 _STATE_UNCONFIGURED = "unconfigured"
 _STATE_INCOMPLETE = "incomplete"
@@ -234,8 +238,9 @@ _STATE_INCOMPLETE = "incomplete"
 _CHANNEL_SETUP_HINTS: dict[str, str] = {
     "gpt": "OpenAI 或任意 OpenAI 兼容站的 API Key",
     "gemini": "Google AI Studio 的 API Key",
-    "comfyui": "只有自己跑了 ComfyUI 才需要：填地址 + 加一套工作流",
+    "comfyui": "选择自建或云端连接，并添加一套工作流",
     "seedream": "火山方舟的 API Key + 模型 ID",
+    "minimax": "MiniMax 或中转站的 API Key + 模型 ID",
     "grok": "xAI 或中转站的 API Key",
     "jimeng": "即梦 2API 服务地址 + sessionid",
     "qwen": "阿里云百炼的 API Key",
@@ -270,7 +275,7 @@ _SWITCH_SAVE_FAILED = (
 
 _USAGE = (
     "用法：/draw [渠道[@工作流]] [参数] <提示词>\n"
-    "渠道：gpt / gemini / comfyui / seedream / grok / jimeng / qwen\n"
+    "渠道：gpt / gemini / comfyui / seedream / grok / jimeng / qwen / minimax\n"
     "      （可用别名，如 openai、即梦、万相）\n"
     "尺寸：--size 1024x1024（像素，各渠道通用）｜--size 2K（档位，Seedream）\n"
     "      --width 800 --height 600｜--ratio 16:9（Gemini/即梦）｜--resolution 2k（即梦）\n"
@@ -470,7 +475,7 @@ def extract_raw_arguments(event: AstrMessageEvent) -> str:
 class MultiImagePlugin(Star):
     """统一多模型生图插件。
 
-    支持 GPT、Gemini、ComfyUI、Seedream、Grok、即梦、通义万相七个渠道，
+    支持 GPT、Gemini、ComfyUI、Seedream、Grok、即梦、通义万相和 MiniMax 八个渠道，
     并针对 NewAPI / OneAPI 这类 OpenAI 协议中转站做了协议回退与参数兼容。
 
     除全局配置外，每个群还可以用 ``/draw_switch`` 单独指定默认渠道，
@@ -586,6 +591,8 @@ class MultiImagePlugin(Star):
                         result = await self._model_options.read(name)
                     else:
                         config = self._build_provider_config(name, DrawArguments())
+                        if name == "comfyui":
+                            config = create_provider(name, config).config
                         result = await test_connection(config)
                 except Exception:  # noqa: BLE001  # Never log raw upstream or configuration data.
                     self._model_options.failed(name)
@@ -836,6 +843,9 @@ class MultiImagePlugin(Star):
                         time.monotonic() - started,
                     )
                 )
+        except ComfyUITimeoutError as exc:
+            state = "timed_out"
+            yield event.plain_result(str(exc))
         except ProviderNotConfiguredError as exc:
             state = "failed"
             yield event.plain_result(f"渠道未配置完整：{exc}")
@@ -975,16 +985,33 @@ class MultiImagePlugin(Star):
                 return ["原生档位的图生图需要 JSON 格式，请调整图生图请求格式。"]
         except ValueError:
             return ["所选原生档位、比例或调用协议不匹配。"]
+        if name == "minimax":
+            try:
+                provider.validate_request(request)
+            except UnsupportedFeatureError:
+                return ["MiniMax 模型、协议或尺寸设置不匹配，请检查渠道配置。"]
         problem = request_problem(config, request, config.model)
         if problem:
             return [problem]
         if name == "comfyui":
+            findings: list[str] = []
             try:
                 for template in provider.templates():
                     if not provider._build_workflow(template, request):
                         return ["工作流内容为空。"]
             except Exception:  # noqa: BLE001 - Do not echo paths or workflow contents.
                 return ["工作流文件无法读取或内容不是有效 API 格式 JSON。"]
+            for template in provider.templates():
+                settings = self._build_provider_config(
+                    name, DrawArguments(workflow=template.alias)
+                )
+                try:
+                    create_provider(name, settings).validate_connection()
+                except ProviderNotConfiguredError as exc:
+                    detail = f"有模板连接配置不完整（{exc}）。"
+                    if detail not in findings:
+                        findings.append(detail)
+            return findings
         return []
 
     async def _review_configuration(self):
@@ -1214,25 +1241,23 @@ class MultiImagePlugin(Star):
             lines.append(f"本群当前渠道：{current}")
             # 配置是管理员随时可以改的，本群设置的渠道可能已经失效；
             # 不提示的话群里只会看到"生图失败"，不知道是设置过期了。
-            stale_name = normalize_provider_name(split_provider_token(current)[0])
-            if stale_name:
-                state, problems = self._channel_state(
-                    stale_name, self._section(stale_name)
-                )
-                if state != _STATE_READY:
-                    detail = "；".join(problems) if problems else "未配置"
-                    lines.append(
-                        f"⚠️ 但它现在不可用（{detail}），/draw 会失败，建议换一个渠道。"
-                    )
+            _, issue = self._validate_channel(current)
+            if issue:
+                lines.append(issue)
         elif default_provider:
             lines.append(f"本群未单独设置，当前跟随全局默认渠道：{default_provider}")
         else:
             lines.append("本群未单独设置，插件配置里也没有全局默认渠道。")
 
         ready: list[str] = []
+        comfy_commands = [
+            f"comfyui@{alias}"
+            for alias in self._comfyui_workflows()
+            if self._validate_channel(f"comfyui@{alias}")[0]
+        ]
         for name in supported_providers():
             state, _problems = self._channel_state(name, self._section(name))
-            if state == _STATE_READY:
+            if state == _STATE_READY or (name == "comfyui" and comfy_commands):
                 ready.append(name)
 
         lines.append("")
@@ -1242,9 +1267,8 @@ class MultiImagePlugin(Star):
                 model = str(self._section(name).get("model") or "").strip()
                 detail = f"（{model}）" if model else ""
                 if name == "comfyui":
-                    workflows = self._comfyui_workflows()
-                    if workflows:
-                        detail = f"（工作流：{'、'.join(workflows)}）"
+                    lines.extend(f"   · {target}" for target in comfy_commands)
+                    continue
                 lines.append(f"   · {name}{detail}")
         else:
             # 一个都没就绪时不要只说"没有"，把下一步指向 /draw_models。
@@ -1281,14 +1305,14 @@ class MultiImagePlugin(Star):
                 )
 
         value = f"{name}@{workflow}" if workflow else name
-        state, problems = self._channel_state(name, self._section(name))
+        state, problems = self._channel_state(name, self._section(name), workflow)
         if state != _STATE_READY:
             detail = "；".join(problems) if problems else "未配置"
             return "", f"渠道 {value} 当前不可用（{detail}），换好之后才能切过去。"
         return value, ""
 
     def _channel_state(
-        self, name: str, section: dict[str, Any]
+        self, name: str, section: dict[str, Any], workflow: str = ""
     ) -> tuple[str, list[str]]:
         """判断单个渠道的状态。
 
@@ -1297,7 +1321,7 @@ class MultiImagePlugin(Star):
 
         @author DeepSeek Harness
         """
-        problems = self._config_problems(name, section)
+        problems = self._config_problems(name, section, workflow)
         if not problems:
             return _STATE_READY, []
 
@@ -1451,9 +1475,12 @@ class MultiImagePlugin(Star):
         self,
         provider_name: str,
         arguments: DrawArguments,
+        *,
+        section: dict[str, Any] | None = None,
     ) -> ProviderConfig:
         """把 schema 里的配置块转换成 :class:`ProviderConfig`。"""
-        section = self._section(provider_name)
+        if section is None:
+            section = self._section(provider_name)
         options: dict[str, Any] = {}
         for key in _PROVIDER_OPTION_KEYS.get(provider_name, ()):
             if key in section and section[key] is not None:
@@ -1464,10 +1491,12 @@ class MultiImagePlugin(Star):
         apply_size_options(provider_name, section, arguments, options)
 
         timeout = section.get("timeout")
-        try:
-            timeout_value = float(timeout)
-        except (TypeError, ValueError):
-            timeout_value = 180.0
+        timeout_value: float | None = None
+        if provider_name != "comfyui":
+            try:
+                timeout_value = float(timeout)
+            except (TypeError, ValueError):
+                timeout_value = 180.0
 
         return ProviderConfig(
             name=provider_name,
@@ -1490,6 +1519,7 @@ class MultiImagePlugin(Star):
         self,
         provider_name: str,
         section: dict[str, Any],
+        workflow: str = "",
     ) -> list[str]:
         """判断某个渠道是否配置完整，返回缺失项说明。
 
@@ -1500,15 +1530,20 @@ class MultiImagePlugin(Star):
         """
         problems: list[str] = []
 
-        if not str(section.get("api_base") or "").strip():
-            problems.append("缺少 API 地址")
-
         if provider_name == "comfyui":
-            # ComfyUI 不需要 Key，判断标准是有没有可用的工作流。
             if not parse_workflow_templates(section.get("workflows")):
-                problems.append("缺少工作流模板")
+                return ["缺少工作流模板"]
+            config = self._build_provider_config(
+                provider_name, DrawArguments(workflow=workflow), section=section
+            )
+            try:
+                create_provider(provider_name, config).validate_connection()
+            except ImageGenerationError as exc:
+                problems.append(str(exc))
             return problems
 
+        if not str(section.get("api_base") or "").strip():
+            problems.append("缺少 API 地址")
         if not str(section.get("api_key") or "").strip():
             problems.append("缺少 API Key")
         if not str(section.get("model") or "").strip():
@@ -1533,6 +1568,14 @@ class MultiImagePlugin(Star):
         """Use channel presets unless this command explicitly supplies a layout."""
         section = self._section(provider_name)
         preset_id = str(section.get("parameter_preset") or "")
+        if (
+            provider_name == "minimax"
+            and arguments.resolution
+            and not (
+                arguments.width or arguments.height or arguments.size or arguments.ratio
+            )
+        ):
+            return arguments
         if arguments.width or arguments.height:
             preset = resolve_manual_size(
                 provider_name, arguments.width, arguments.height
@@ -1552,6 +1595,14 @@ class MultiImagePlugin(Star):
             )
         if preset is None:
             return arguments
+        if (
+            provider_name == "minimax"
+            and preset_id not in {"custom", "native"}
+            and not (arguments.width or arguments.height or arguments.size)
+            and str(section.get("model") or "").lower() == "image-01-live"
+            and supports_native_ratio(provider_name, section)
+        ):
+            return replace(arguments, ratio=preset.ratio)
         changes = {"width": preset.width, "height": preset.height, "size": preset.size}
         if not (arguments.width or arguments.height) and preset_id != "custom":
             changes["count"] = arguments.count or preset.count
@@ -1599,16 +1650,19 @@ class MultiImagePlugin(Star):
         """Validate effective command/config parameters without submitting a task."""
         config = self._build_provider_config(provider_name, arguments)
         provider = create_provider(provider_name, config)
-        problems = self._config_problems(provider_name, self._section(provider_name))
-        if problems:
-            raise ProviderNotConfiguredError("；".join(problems))
+        if provider_name != "comfyui":
+            problems = self._config_problems(
+                provider_name, self._section(provider_name)
+            )
+            if problems:
+                raise ProviderNotConfiguredError("；".join(problems))
         # Use the editing model's capabilities when it differs from the text model.
         effective = dict(
             self._section(provider_name), model=provider.resolve_model(request)
         )
         validate_effective_size(provider_name, effective, arguments, config.options)
         provider.validate_request(request)
-        return config, provider
+        return provider.config, provider
 
     async def _generate(
         self,

@@ -25,6 +25,7 @@ from .gemini import GeminiProvider
 from .grok import GrokProvider
 from .http import HttpRequestFailed
 from .jimeng import JimengProvider
+from .minimax import MiniMaxProvider
 from .openai_image import GPTProvider, OpenAICompatibleProvider
 from .seedream import SeedreamProvider
 
@@ -41,6 +42,7 @@ __all__ = [
     "ImageGenerationRequest",
     "ImageProvider",
     "JimengProvider",
+    "MiniMaxProvider",
     "OpenAICompatibleProvider",
     "ProviderConfig",
     "ProviderNotConfiguredError",
@@ -64,6 +66,7 @@ PROVIDER_CLASSES: dict[str, type[ImageProvider]] = {
     "grok": GrokProvider,
     "jimeng": JimengProvider,
     "qwen": DashScopeProvider,
+    "minimax": MiniMaxProvider,
 }
 
 #: 用户可能输入的各种写法 -> 标准渠道标识。
@@ -110,6 +113,9 @@ PROVIDER_ALIASES: dict[str, str] = {
     "jm": "jimeng",
     # 阿里云百炼 / 通义万相
     "qwen": "qwen",
+    "minimax": "minimax",
+    "minimax生图": "minimax",
+    "海螺生图": "minimax",
     "qwen-image": "qwen",
     "dashscope": "qwen",
     "bailian": "qwen",

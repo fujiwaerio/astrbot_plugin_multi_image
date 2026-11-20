@@ -154,8 +154,8 @@ class ProviderConfig:
     api_style: str = "auto"
     """调用协议风格，见各适配器说明。``auto`` 表示按候选顺序自动回退。"""
 
-    timeout: float = 180.0
-    """单次 HTTP 请求超时（秒）。"""
+    timeout: float | None = 180.0
+    """单次 HTTP 请求超时（秒）。None 由渠道任务的总时限统一控制。"""
 
     extra_headers: dict[str, str] = field(default_factory=dict)
     """附加请求头，用于自建中转站要求自定义鉴权头的场景。"""

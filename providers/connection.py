@@ -19,10 +19,12 @@ from urllib.parse import urlsplit, urlunsplit
 
 import httpx
 
-from .base import ProviderConfig
+from .base import ProviderConfig, ProviderNotConfiguredError
+from .comfyui_remote import connection_root
 from .dashscope import DashScopeProvider, clean_dashscope_base
 from .gemini import GeminiProvider
 from .http import auth_headers, build_client, resolve_endpoint
+from .minimax import minimax_api_root
 from .model_catalog import is_image_model
 
 # 包括 DNS、代理、连接、读取以及 Gemini 协议回退在内的单渠道总上限。
@@ -76,9 +78,19 @@ def _base_url(config: ProviderConfig) -> str:
 
 
 def _probes(config: ProviderConfig) -> list[_Probe]:
-    base = _base_url(config)
     if config.name == "comfyui":
+        base = connection_root(
+            config.api_style,
+            config.api_base,
+            config.api_key,
+            str(config.option("runninghub_region", "cn") or "cn"),
+        )
+        if config.api_style.strip().lower() == "cloud":
+            return [_Probe(base + "/api/user", "comfy_cloud")]
+        if config.api_style.strip().lower() == "runninghub":
+            return []
         return [_Probe(resolve_endpoint(base, "/system_stats", ""), "comfyui")]
+    base = _base_url(config)
     if config.name == "qwen":
         # 百炼原生生图接口没有通用模型列表。仅用 GET 探测实际路由，
         # 405/404 等结果只说明服务器响应，不能据此断言 Key 有效。
@@ -117,6 +129,8 @@ def _probes(config: ProviderConfig) -> list[_Probe]:
             else:
                 candidates.append(_Probe(resolve_endpoint(base, "/models", "v1")))
         return list(dict.fromkeys(candidates))
+    if config.name == "minimax":
+        base = minimax_api_root(base)
     version = "api/v3" if config.name == "seedream" else "v1"
     return [_Probe(resolve_endpoint(base, "/models", version))]
 
@@ -133,6 +147,13 @@ async def _probe_once(
         key_header="x-goog-api-key" if probe.native_key else "Authorization",
         scheme="" if probe.native_key else "Bearer",
     )
+    if probe.kind == "comfy_cloud":
+        headers = {
+            name: value
+            for name, value in headers.items()
+            if name.lower() not in {"authorization", "x-api-key"}
+        }
+        headers["X-API-Key"] = config.api_key
     # 不跟随重定向，防止自定义凭证头被转发到其它域名或降级到 HTTP。
     # stream 的体积限制也覆盖 HTML 错误页和非标准网关响应。
     url = probe.url
@@ -217,6 +238,15 @@ async def _probe_once(
                 return ConnectionResult(
                     "ok", "ComfyUI 系统状态接口可访问（未执行工作流）", status_code=code
                 )
+        elif probe.kind == "comfy_cloud":
+            if data.get("status") == "active":
+                return ConnectionResult(
+                    "ok", "Comfy Cloud 账号接口可访问（未执行工作流）", status_code=code
+                )
+            if data.get("status") == "waitlisted":
+                return ConnectionResult(
+                    "warning", "Comfy Cloud 账户仍在候补状态", status_code=code
+                )
         elif isinstance(data.get("models" if probe.native_key else "data"), list):
             if include_models:
                 entries = data["models" if probe.native_key else "data"]
@@ -281,7 +311,10 @@ async def _check_connection(
     config: ProviderConfig, *, include_models: bool = False
 ) -> ConnectionResult:
     """复用只读请求、鉴权、超时与错误处理，可按需提取模型 ID。"""
-    if not config.api_base.strip():
+    if not config.api_base.strip() and (
+        config.name != "comfyui"
+        or config.api_style.strip().lower() in {"native", "auto", ""}
+    ):
         return ConnectionResult("skip", "未配置 API 地址，已跳过")
     credential_headers = {"authorization", "x-api-key", "x-goog-api-key"}
     if (
@@ -296,7 +329,9 @@ async def _check_connection(
     start = time.monotonic()
     result = ConnectionResult("error", "连接测试失败")
     try:
-        timeout = float(config.timeout)
+        timeout = (
+            float(config.timeout) if config.timeout is not None else MAX_TEST_SECONDS
+        )
         timeout = (
             min(MAX_TEST_SECONDS, max(1.0, timeout))
             if math.isfinite(timeout)
@@ -304,6 +339,10 @@ async def _check_connection(
         )
         config = replace(config, timeout=timeout)
         probes = _probes(config)
+        if config.name == "comfyui" and not probes:
+            return ConnectionResult(
+                "warning", "RunningHub 暂无此插件可用的 GET 鉴权探测接口"
+            )
 
         async def run() -> ConnectionResult:
             async with build_client(config) as client:
@@ -325,6 +364,8 @@ async def _check_connection(
                 return last
 
         result = await asyncio.wait_for(run(), timeout=timeout)
+    except ProviderNotConfiguredError as exc:
+        result = ConnectionResult("skip", str(exc))
     except (TimeoutError, httpx.TimeoutException):
         result = ConnectionResult("error", "连接或读取超时，请检查地址、网络和代理")
     except httpx.ProxyError:

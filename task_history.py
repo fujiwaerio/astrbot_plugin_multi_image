@@ -17,6 +17,7 @@ STATES = {
     "failed": "失败",
     "uncertain": "结果不确定，请核对上游任务或账单",
     "interrupted": "图片准备或发送流程中断",
+    "timed_out": "等待 30 分钟未取得图片，已停止等待",
 }
 
 

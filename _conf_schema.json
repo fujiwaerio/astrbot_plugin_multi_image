@@ -12,7 +12,8 @@
       "seedream",
       "grok",
       "jimeng",
-      "qwen"
+      "qwen",
+      "minimax"
     ]
   },
   "test_connection_on_save": {
@@ -556,8 +557,24 @@
   "comfyui": {
     "description": "ComfyUI 渠道",
     "type": "object",
-    "hint": "⚠️ 只在自己部署了 ComfyUI 时才需要配置，没装就整块留空、不影响其它渠道。地址默认留空，需要时填 ComfyUI 的根地址（如 http://127.0.0.1:8188）；这个渠道是否可用只看「工作流模板」有没有内容",
+    "hint": "添加多套 API 格式工作流，每套可继承渠道默认连接，或独立连接自建 ComfyUI、Comfy Cloud、RunningHub。一次生成最多等待 30 分钟。",
     "items": {
+      "api_style": {
+        "description": "默认连接方式",
+        "type": "string",
+        "default": "native",
+        "options": ["native", "cloud", "runninghub"],
+        "labels": ["自建／反向代理", "Comfy Cloud（官方 v2）", "RunningHub 工作流"]
+      },
+      "runninghub_region": {
+        "description": "RunningHub 站点",
+        "type": "string",
+        "default": "cn",
+        "options": ["cn", "global"],
+        "labels": ["中国站", "国际站"],
+        "condition": {"api_style": "runninghub"},
+        "hint": "选择创建 API Key 与保存工作流的站点。"
+      },
       "parameter_preset": {
         "description": "常用参数预设",
         "type": "string",
@@ -650,13 +667,14 @@
       "api_base": {
         "description": "ComfyUI 地址",
         "type": "string",
-        "hint": "只填根地址，如 http://127.0.0.1:8188，插件会自动拼接 /prompt、/history、/view",
-        "default": ""
+        "hint": "自建或反代的 HTTP(S) 根地址，可包含代理路径前缀。示例 http://127.0.0.1:8188 或 https://example.com/comfy/api。",
+        "default": "",
+        "condition": {"api_style": "native"}
       },
       "api_key": {
-        "description": "API Key（可选）",
+        "description": "API Key",
         "type": "string",
-        "hint": "ComfyUI 套在带鉴权的反向代理后面时才需要",
+        "hint": "云端连接必填。自建或反代按服务器鉴权要求填写。",
         "default": "",
         "secret": true
       },
@@ -676,6 +694,49 @@
                 "type": "string",
                 "hint": "用 /draw comfyui@别名 选择这套工作流",
                 "default": "default"
+              },
+              "runninghub_id": {
+                "description": "RunningHub 工作流 ID",
+                "type": "string",
+                "default": "",
+                "hint": "仅在 RunningHub 模式使用。填写已保存工作流的数字 ID，并使用对应版本的 API 格式 JSON。"
+              },
+              "connection_style": {
+                "description": "工作流连接方式",
+                "type": "string",
+                "default": "inherit",
+                "options": ["inherit", "native", "cloud", "runninghub"],
+                "labels": ["继承渠道默认连接", "自建／反向代理", "Comfy Cloud（官方 v2）", "RunningHub 工作流"],
+                "hint": "选择独立连接时使用此模板的地址、Key 和附加请求头。"
+              },
+              "connection_base": {
+                "description": "此工作流的 ComfyUI 地址",
+                "type": "string",
+                "default": "",
+                "condition": {"connection_style": "native"},
+                "hint": "填写自建服务或反向代理的 HTTP(S) 根地址。"
+              },
+              "connection_key": {
+                "description": "此工作流的 API Key",
+                "type": "string",
+                "default": "",
+                "secret": true,
+                "hint": "独立的云端连接必填，自建按服务器鉴权要求填写。"
+              },
+              "connection_region": {
+                "description": "此工作流的 RunningHub 站点",
+                "type": "string",
+                "default": "cn",
+                "options": ["cn", "global"],
+                "labels": ["中国站", "国际站"],
+                "condition": {"connection_style": "runninghub"}
+              },
+              "connection_headers": {
+                "description": "此工作流的附加请求头",
+                "type": "dict",
+                "items": {},
+                "default": {},
+                "hint": "只在模板选择独立连接时生效。"
               },
               "workflow_path": {
                 "description": "工作流文件路径",
@@ -718,6 +779,18 @@
                 "type": "string",
                 "hint": "图生图时写入参考图，留空则自动查找 LoadImage",
                 "default": ""
+              },
+              "reference_nodes": {
+                "description": "多参考图输入节点 ID",
+                "type": "list",
+                "default": [],
+                "hint": "按消息中的图片顺序填写节点 ID，例如 10、11。各节点须有可写入文件名的 image 输入。留空沿用旧版单图节点。"
+              },
+              "output_nodes": {
+                "description": "要回传的图片输出节点 ID",
+                "type": "list",
+                "default": [],
+                "hint": "按返回顺序填写输出节点 ID。留空返回所有产出图片的节点，包括预览节点。"
               }
             }
           }
@@ -735,24 +808,12 @@
         "type": "float",
         "default": 1.0
       },
-      "max_wait": {
-        "description": "最长等待时间（秒）",
-        "type": "int",
-        "hint": "复杂工作流可能跑几分钟，按需调大",
-        "default": 300
-      },
       "client_id": {
         "description": "ComfyUI client_id",
         "type": "string",
         "hint": "留空自动生成",
         "default": "",
         "invisible": true
-      },
-      "timeout": {
-        "description": "单次请求超时（秒）",
-        "type": "int",
-        "default": 60,
-        "hint": "仅作用于本渠道的单次 HTTP 请求，生图较慢时可调大；异步任务总等待时长由本渠道的最长等待时间单独控制（若有该项）。"
       },
       "extra_headers": {
         "description": "附加请求头",
@@ -1568,6 +1629,206 @@
         "type": "int",
         "default": 0,
         "invisible": true
+      }
+    }
+  },
+  "minimax": {
+    "description": "MiniMax 生图",
+    "type": "object",
+    "items": {
+      "parameter_preset": {
+        "description": "常用参数预设",
+        "type": "string",
+        "hint": "尺寸统一在此选择：场景预设、手动宽高，或当前模型与协议支持的原生档位／比例。模型自适应不换算成固定像素。更换模型或协议后，保存并重新打开配置以刷新选项；命令尺寸优先。",
+        "default": "custom",
+        "options": [
+          "avatar",
+          "portrait",
+          "landscape",
+          "wallpaper",
+          "cover",
+          "custom"
+        ],
+        "labels": [
+          "头像方图 · 1:1",
+          "竖版人像 · 3:4",
+          "横版插画 · 4:3",
+          "手机壁纸 · 9:16",
+          "宽屏封面 · 16:9",
+          "手动宽高"
+        ]
+      },
+      "native_resolution": {
+        "description": "模型分辨率档位",
+        "type": "string",
+        "default": "",
+        "options": [
+          ""
+        ],
+        "labels": [
+          "模型默认"
+        ],
+        "condition": {
+          "parameter_preset": "native"
+        },
+        "invisible": true,
+        "hint": "MiniMax H3 原生接口的面积档位，需与像素宽高分开使用。"
+      },
+      "native_ratio": {
+        "description": "模型画面比例",
+        "type": "string",
+        "default": "",
+        "options": [
+          "",
+          "1:1",
+          "4:3",
+          "3:4",
+          "16:9",
+          "9:16",
+          "3:2",
+          "2:3",
+          "21:9"
+        ],
+        "labels": [
+          "模型默认",
+          "1:1",
+          "4:3",
+          "3:4",
+          "16:9",
+          "9:16",
+          "3:2",
+          "2:3",
+          "21:9"
+        ],
+        "condition": {
+          "parameter_preset": "native"
+        },
+        "invisible": true,
+        "hint": "适用的 MiniMax 原生协议按比例生成图片。"
+      },
+      "dimensions": {
+        "description": "手动宽高（宽:高）",
+        "type": "string",
+        "default": "0:0",
+        "condition": {
+          "parameter_preset": "custom"
+        },
+        "hint": "填写像素宽度:像素高度，例如 1080:1920 表示宽 1080、高 1920。0:0 表示未指定；只填一边时可用 1080:0，另一边回退为 1024。只在“手动宽高”模式生效，命令参数优先；模型可能限制可用尺寸。"
+      },
+      "width": {
+        "type": "int",
+        "default": 0,
+        "invisible": true
+      },
+      "height": {
+        "type": "int",
+        "default": 0,
+        "invisible": true
+      },
+      "api_base": {
+        "description": "API 地址",
+        "type": "string",
+        "hint": "支持中国站、国际站或中转地址。中转请填写服务商地址和对应 Key，并选择实际支持的协议。",
+        "default": "https://api.minimax.cn"
+      },
+      "api_key": {
+        "description": "API Key",
+        "type": "string",
+        "default": "",
+        "secret": true,
+        "obvious_hint": true
+      },
+      "model": {
+        "description": "模型名称",
+        "type": "string",
+        "hint": "官方可用 MiniMax-H3-Image、MiniMax-H3-Image-Highspeed、image-01、image-01-live。中转填写服务商给出的模型 ID。",
+        "default": "MiniMax-H3-Image"
+      },
+      "manual_model_input": {
+        "description": "手动填写模型名称",
+        "type": "bool",
+        "hint": "开启并保存后重新打开配置，模型名称改为手动输入；关闭并保存后恢复自动读取生图模型下拉。此开关不修改已保存的模型。",
+        "default": false
+      },
+      "size": {
+        "type": "string",
+        "default": "",
+        "invisible": true
+      },
+      "api_style": {
+        "description": "调用协议",
+        "type": "string",
+        "hint": "每次只使用已选协议。使用原生兼容中转时选择相应原生接口；不自动切换协议或重提。",
+        "default": "native",
+        "options": [
+          "native",
+          "h3",
+          "legacy",
+          "images",
+          "chat"
+        ],
+        "labels": [
+          "原生 · 按模型自动选择",
+          "原生 · H3",
+          "原生 · image-01",
+          "中转 · OpenAI 图片",
+          "中转 · OpenAI 对话"
+        ]
+      },
+      "timeout": {
+        "description": "请求超时（秒）",
+        "type": "int",
+        "default": 600,
+        "hint": "MiniMax 官方 H3 建议将生图 HTTP 超时设为至少 600 秒。"
+      },
+      "extra_headers": {
+        "description": "附加请求头",
+        "type": "dict",
+        "items": {},
+        "hint": "自建中转站需要自定义鉴权头时填写，例如 {\"X-Api-Key\":\"xxx\"}",
+        "default": {}
+      },
+      "extra_body": {
+        "description": "扩展请求参数",
+        "type": "dict",
+        "items": {},
+        "hint": "原生 H3 可补充 output_format、output_compression 和 aigc_watermark；image-01 可补充 style、aigc_watermark。OpenAI 中转可以填写服务商要求的扩展字段。",
+        "default": {}
+      },
+      "proxy": {
+        "description": "HTTP(S) 代理",
+        "type": "string",
+        "hint": "例如 http://127.0.0.1:7890",
+        "default": ""
+      },
+      "verify_ssl": {
+        "description": "校验 TLS 证书",
+        "type": "bool",
+        "hint": "自建自签名站点可关闭",
+        "default": true
+      },
+      "force_download": {
+        "description": "强制代为下载图片",
+        "type": "bool",
+        "default": false,
+        "hint": "仅作用于本渠道。图片链接需要鉴权时开启，由插件下载成本地文件发送；鉴权头只发送到与本渠道 API 同源的地址。"
+      },
+      "size_settings_version": {
+        "type": "int",
+        "default": 0,
+        "invisible": true
+      },
+      "disable_prompt_enhanced": {
+        "description": "关闭 H3 文生图提示词增强",
+        "type": "bool",
+        "default": false,
+        "hint": "关闭后必须指定像素尺寸或固定比例。H3 图片编辑始终由上游启用提示词增强。"
+      },
+      "prompt_optimizer": {
+        "description": "开启 image-01 提示词优化",
+        "type": "bool",
+        "default": false,
+        "hint": "只作用于 MiniMax 旧版原生接口。"
       }
     }
   }
